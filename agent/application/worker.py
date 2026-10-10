@@ -6,11 +6,11 @@ import time
 from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import replace
 from pathlib import Path
-from typing import Protocol, runtime_checkable
+from typing import Any, Protocol, runtime_checkable
 from urllib.parse import urlparse
 
 from agent.config import Settings
-from agent.domain.app_profile import select_current
+from agent.domain.app_profile import app_key, select_current
 from agent.domain.budget import task_deadline
 from agent.domain.guard import Guard
 from agent.domain.models import Plan, Procedure, ScriptStep, TaskResult, TaskStatus, TextBox
@@ -27,6 +27,8 @@ from agent.ports.interfaces import Classifier, Memory, Model, Reader, Screen
 log = logging.getLogger(__name__)
 
 FIRST_FRAME_TIMEOUT_S = 30.0
+SCREEN_WIDTH = 1280
+HEADER_BAND_PX = 64  # title bar plus top menu, read as a region so dark overlays are inverted
 FIRST_FRAME_POLL_S = 0.2
 HARD_MARGIN_S = 5.0  # stop before the task manager's own timeout
 VERIFY_RESERVE_S = 30.0  # time kept for the final verification call
@@ -175,7 +177,7 @@ class AgentWorker:
             max_turns=self._max_turns,
             classification=classification,
         )
-        app = self._fingerprint(boxes)
+        app = await self._app_key(image, boxes)
         orientation = await policy.orient(image, boxes)
         plan = await policy.plan(self._instruction, orientation, image, boxes)
         intent = intent_key(plan)
@@ -299,6 +301,18 @@ class AgentWorker:
             log.exception("no se pudo registrar el fallo de la repetición desde memoria")
         if penalize:
             await self._penalize(app, intent, [used])
+
+    async def _app_key(self, image: Any, boxes: list[TextBox]) -> str | None:
+        """Memory key: the app name read from the title bar region (readable even under a modal that
+        darkens it for full-screen OCR), else the name in the full-screen OCR, else the legacy fingerprint."""
+        if self._memory is None:
+            return None
+        try:
+            header = await self._reader.read(image, (0, 0, SCREEN_WIDTH, HEADER_BAND_PX))
+        except Exception:
+            log.exception("no se pudo leer el encabezado de la aplicación")
+            header = []
+        return app_key(header) or app_key(boxes) or self._fingerprint(boxes)
 
     def _fingerprint(self, boxes: list[TextBox]) -> str | None:
         if self._memory is None:

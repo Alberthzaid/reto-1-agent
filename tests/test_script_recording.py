@@ -88,13 +88,18 @@ async def test_plan_values_can_be_set_after_construction() -> None:
 
 
 @pytest.mark.asyncio
-async def test_unlabeled_click_or_field_leaves_no_script() -> None:
+async def test_unlabeled_click_leaves_no_script() -> None:
     toolbox = make()
     await toolbox.execute(call("click", x=1200, y=500))  # nothing readable there
     assert toolbox.script == ()
+
+
+@pytest.mark.asyncio
+async def test_unlabeled_field_is_kept_at_its_position() -> None:
     toolbox = make(boxes=[CLIENTES, GUARDAR])
     await toolbox.execute(call("type_into", x=400, y=300, text="901234567"))  # no field label nearby
-    assert toolbox.script == ()
+    [step] = toolbox.script
+    assert (step.kind, step.field, step.field_label, step.x, step.y) == ("fill", "nit", "", 400, 300)
 
 
 @pytest.mark.asyncio

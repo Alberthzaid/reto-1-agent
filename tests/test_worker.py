@@ -709,3 +709,21 @@ async def test_replay_rejected_by_the_verifier_counts_a_replay_failure(tmp_path:
     assert (await second.run())[0] is TaskStatus.fallida
     [stored] = await memory.list_procedures()
     assert (stored.exitos, stored.fallos_replay) == (0, 1)
+
+
+@pytest.mark.asyncio
+async def test_app_is_keyed_by_header_name_even_when_a_modal_hides_it_from_full_screen_ocr(tmp_path: Path) -> None:
+    title = TextBox(text="SIGECOM - Distribuidora Andina v4.2 Hoy: 14/10/2026", x=8, y=11, w=700, h=14)
+
+    def header_only(_img: Any, region: tuple[int, int, int, int]) -> list[TextBox]:
+        if region[:2] == (0, 0) and region[3] <= 80:
+            return [title]
+        x, y, w, h = region
+        return [b for b in (GUARDAR,) if x <= b.center[0] < x + w and y <= b.center[1] < y + h]
+
+    memory = SqliteMemory(tmp_path / "agent.db")
+    reader = FakeReader([HOY, GUARDAR], region_fn=header_only)  # full-screen OCR misses the app name
+    worker, _, _, _ = build(HAPPY_FAST, [CONFIRM], memory=memory, reader=reader)
+    status, _ = await worker.run()
+    assert status is TaskStatus.terminada
+    assert [p.exitos for p in await memory.procedures("sigecom", INTENT)] == [1]

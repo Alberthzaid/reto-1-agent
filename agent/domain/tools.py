@@ -892,9 +892,13 @@ class ToolBox:
         for (x, y, text), region in zip(fields, regions):
             name = self._field_name(text)
             label = field_label_box(self._boxes, region, typed)
-            if name is None or label is None:
-                self._void_script("typed text outside the plan" if name is None else "field without a label")
+            if name is None:
+                self._void_script("typed text outside the plan")
                 return
+            if label is None:
+                # No readable label (e.g. a small search box): replayed at its position, with the reread check.
+                self._add_script(ScriptStep(kind="fill", field_label="", field=name, x=x, y=y))
+                continue
             lx, ly = label.center
             self._add_script(
                 ScriptStep(kind="fill", field_label=label.text.strip(), field=name, x=x, y=y, dx=x - lx, dy=y - ly)
