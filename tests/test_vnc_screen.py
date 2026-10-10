@@ -15,13 +15,13 @@ from agent.infra.vnc.vnc_screen import VncScreen
 from agent.ports.interfaces import Screen
 from dev_tools.mock_vnc_server import MockVncServer
 
-PASSWORD = "hunter2-secret"
+AUTH_FIXTURE = "mock-auth-fixture"
 CTRL, KEY_A = 0xFFE3, 0x61
 
 
 async def open_screen(server: MockVncServer) -> VncScreen:
     screen = VncScreen()
-    await screen.connect(server.url, PASSWORD)
+    await screen.connect(server.url, AUTH_FIXTURE)
     for _ in range(250):  # wait for the first full frame
         if screen.last_change_ts() > 0:
             return screen
@@ -43,7 +43,7 @@ def test_vnc_screen_satisfies_screen_protocol() -> None:
 
 @pytest.mark.asyncio
 async def test_screenshot_is_rgb_1280x800_independent_copy() -> None:
-    async with MockVncServer(PASSWORD) as server:
+    async with MockVncServer(AUTH_FIXTURE) as server:
         screen = await open_screen(server)
         try:
             img = await screen.screenshot()
@@ -59,7 +59,7 @@ async def test_screenshot_is_rgb_1280x800_independent_copy() -> None:
 
 @pytest.mark.asyncio
 async def test_left_click_sequence_and_hold_time() -> None:
-    async with MockVncServer(PASSWORD, repaint_delay=0.05) as server:
+    async with MockVncServer(AUTH_FIXTURE, repaint_delay=0.05) as server:
         screen = await open_screen(server)
         try:
             await screen.click(640, 400)
@@ -77,7 +77,7 @@ async def test_left_click_sequence_and_hold_time() -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("button,mask", [("left", 1), ("middle", 2), ("right", 4)])
 async def test_click_button_masks(button: str, mask: int) -> None:
-    async with MockVncServer(PASSWORD, repaint_delay=0.05) as server:
+    async with MockVncServer(AUTH_FIXTURE, repaint_delay=0.05) as server:
         screen = await open_screen(server)
         try:
             await screen.click(10, 20, button=button)
@@ -89,7 +89,7 @@ async def test_click_button_masks(button: str, mask: int) -> None:
 
 @pytest.mark.asyncio
 async def test_unknown_button_raises_value_error() -> None:
-    async with MockVncServer(PASSWORD) as server:
+    async with MockVncServer(AUTH_FIXTURE) as server:
         screen = await open_screen(server)
         try:
             with pytest.raises(ValueError):
@@ -100,7 +100,7 @@ async def test_unknown_button_raises_value_error() -> None:
 
 @pytest.mark.asyncio
 async def test_double_click_has_two_presses_about_80ms_apart() -> None:
-    async with MockVncServer(PASSWORD, repaint_delay=0.05) as server:
+    async with MockVncServer(AUTH_FIXTURE, repaint_delay=0.05) as server:
         screen = await open_screen(server)
         try:
             await screen.click(100, 100, double=True)
@@ -117,7 +117,7 @@ async def test_double_click_has_two_presses_about_80ms_apart() -> None:
 
 @pytest.mark.asyncio
 async def test_delayed_repaint_changes_screen_after_click() -> None:
-    async with MockVncServer(PASSWORD) as server:  # default 600 ms repaint delay
+    async with MockVncServer(AUTH_FIXTURE) as server:  # default 600 ms repaint delay
         screen = await open_screen(server)
         try:
             before = await screen.screenshot()
@@ -135,7 +135,7 @@ async def test_delayed_repaint_changes_screen_after_click() -> None:
 
 @pytest.mark.asyncio
 async def test_type_text_sends_keysyms_with_spacing() -> None:
-    async with MockVncServer(PASSWORD) as server:
+    async with MockVncServer(AUTH_FIXTURE) as server:
         screen = await open_screen(server)
         try:
             await screen.type_text("hé\n")
@@ -154,7 +154,7 @@ async def test_type_text_sends_keysyms_with_spacing() -> None:
 
 @pytest.mark.asyncio
 async def test_key_combo_presses_in_order_and_releases_reversed() -> None:
-    async with MockVncServer(PASSWORD) as server:
+    async with MockVncServer(AUTH_FIXTURE) as server:
         screen = await open_screen(server)
         try:
             await screen.key("ctrl+a")
@@ -168,7 +168,7 @@ async def test_key_combo_presses_in_order_and_releases_reversed() -> None:
 
 @pytest.mark.asyncio
 async def test_blocked_key_combo_sends_nothing() -> None:
-    async with MockVncServer(PASSWORD) as server:
+    async with MockVncServer(AUTH_FIXTURE) as server:
         screen = await open_screen(server)
         try:
             with pytest.raises(BlockedKeyError):
@@ -182,7 +182,7 @@ async def test_blocked_key_combo_sends_nothing() -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("steps,button_mask,count", [(3, 8, 3), (-2, 16, 2)])
 async def test_scroll_buttons_and_counts(steps: int, button_mask: int, count: int) -> None:
-    async with MockVncServer(PASSWORD) as server:
+    async with MockVncServer(AUTH_FIXTURE) as server:
         screen = await open_screen(server)
         try:
             await screen.scroll(300, 200, steps)
@@ -196,7 +196,7 @@ async def test_scroll_buttons_and_counts(steps: int, button_mask: int, count: in
 
 @pytest.mark.asyncio
 async def test_scroll_zero_steps_sends_nothing() -> None:
-    async with MockVncServer(PASSWORD) as server:
+    async with MockVncServer(AUTH_FIXTURE) as server:
         screen = await open_screen(server)
         try:
             await screen.scroll(300, 200, 0)
@@ -209,7 +209,7 @@ async def test_scroll_zero_steps_sends_nothing() -> None:
 @pytest.mark.asyncio
 @pytest.mark.parametrize("x,y", [(-1, 0), (0, -1), (1280, 0), (0, 800), (5000, 5000)])
 async def test_out_of_bounds_coordinates_raise_value_error(x: int, y: int) -> None:
-    async with MockVncServer(PASSWORD) as server:
+    async with MockVncServer(AUTH_FIXTURE) as server:
         screen = await open_screen(server)
         try:
             with pytest.raises(ValueError):
@@ -230,7 +230,7 @@ async def test_screenshot_before_connect_raises() -> None:
 
 @pytest.mark.asyncio
 async def test_type_text_gap_is_15_to_20_ms(monkeypatch: pytest.MonkeyPatch) -> None:
-    async with MockVncServer(PASSWORD) as server:
+    async with MockVncServer(AUTH_FIXTURE) as server:
         screen = await open_screen(server)
         try:
             real_sleep = asyncio.sleep
@@ -255,7 +255,7 @@ async def test_type_text_gap_is_15_to_20_ms(monkeypatch: pytest.MonkeyPatch) -> 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("op", ["click", "type_text", "key", "scroll", "screenshot"])
 async def test_connection_error_mid_session_closes_client(op: str) -> None:
-    async with MockVncServer(PASSWORD) as server:
+    async with MockVncServer(AUTH_FIXTURE) as server:
         screen = await open_screen(server)
         client = screen._client
         assert client is not None and client._ws is not None and client._task is not None
@@ -280,7 +280,7 @@ async def test_connection_error_mid_session_closes_client(op: str) -> None:
 
 @pytest.mark.asyncio
 async def test_error_halfway_through_typing_closes_client(monkeypatch: pytest.MonkeyPatch) -> None:
-    async with MockVncServer(PASSWORD) as server:
+    async with MockVncServer(AUTH_FIXTURE) as server:
         screen = await open_screen(server)
         client = screen._client
         assert client is not None and client._ws is not None
@@ -304,7 +304,7 @@ async def test_error_halfway_through_typing_closes_client(monkeypatch: pytest.Mo
 
 @pytest.mark.asyncio
 async def test_value_error_does_not_close_client() -> None:
-    async with MockVncServer(PASSWORD) as server:
+    async with MockVncServer(AUTH_FIXTURE) as server:
         screen = await open_screen(server)
         try:
             with pytest.raises(ValueError):
@@ -319,7 +319,7 @@ async def test_value_error_does_not_close_client() -> None:
 
 @pytest.mark.asyncio
 async def test_reader_dying_with_non_rfb_error_surfaces_protocol_error_and_closes() -> None:
-    async with MockVncServer(PASSWORD, width=64, height=48) as server:
+    async with MockVncServer(AUTH_FIXTURE, width=64, height=48) as server:
         screen = await open_screen(server)
         client = screen._client
         assert client is not None and client._ws is not None and client._task is not None
@@ -332,14 +332,14 @@ async def test_reader_dying_with_non_rfb_error_surfaces_protocol_error_and_close
         with pytest.raises(RFBProtocolError) as info:
             await screen.screenshot()
         assert isinstance(info.value.__cause__, ValueError)
-        assert PASSWORD not in str(info.value)
+        assert AUTH_FIXTURE not in str(info.value)
         assert screen._client is None
         assert ws.state is State.CLOSED
 
 
 @pytest.mark.asyncio
 async def test_key_through_screen_draws_on_mock_framebuffer() -> None:
-    async with MockVncServer(PASSWORD, width=64, height=48) as server:
+    async with MockVncServer(AUTH_FIXTURE, width=64, height=48) as server:
         screen = await open_screen(server)
         try:
             before = await screen.screenshot()
