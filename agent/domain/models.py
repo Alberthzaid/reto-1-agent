@@ -62,9 +62,13 @@ class Commit:
 
 @dataclass(frozen=True, slots=True)
 class Procedure:
+    """A navigation route that completed a verified task: short step texts, never customer data."""
+
     app: str
     intent: str
-    steps: tuple[Action, ...] = ()
+    steps: tuple[str, ...] = ()
+    aprendizaje: str = ""
+    exitos: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,3 +125,6 @@ class Classification:
     app: str
     intent: str
     confidence: float = 1.0
+    task_type: str | None = None
+    destructive: bool | None = None
+    two_data: bool | None = None

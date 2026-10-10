@@ -3,19 +3,35 @@
 import asyncio
 import os
 from collections import defaultdict
+from pathlib import Path
 
 import pytesseract
-from PIL import Image
+from PIL import Image, ImageOps, ImageStat
 from pytesseract import Output
 
 from agent.domain.models import TextBox
+
+DARK_MEAN_LUMINANCE = 128
+
+
+def _prepare(crop: Image.Image) -> Image.Image:
+    """Grayscale crop; inverted when mostly dark so light-on-dark text (buttons, toasts) reads as dark-on-light."""
+    gray = crop.convert("L")
+    if ImageStat.Stat(gray).mean[0] < DARK_MEAN_LUMINANCE:
+        return ImageOps.invert(gray)
+    return gray
 
 
 class TesseractReader:
     """Reads Spanish and English text from screen coordinates."""
 
     def __init__(self, tesseract_cmd: str | None = None) -> None:
-        self._tesseract_cmd = tesseract_cmd or os.environ.get("TESSERACT_CMD")
+        default_cmd = Path(r"C:\Program Files\Tesseract-OCR\tesseract.exe")
+        configured_cmd = tesseract_cmd or os.environ.get("TESSERACT_CMD")
+        self._tesseract_cmd = configured_cmd or (str(default_cmd) if default_cmd.is_file() else None)
+        default_tessdata = Path(os.environ.get("LOCALAPPDATA", "")) / "Tesseract-OCR" / "tessdata"
+        configured_tessdata = os.environ.get("TESSDATA_PREFIX")
+        self._tessdata_dir = configured_tessdata or (str(default_tessdata) if default_tessdata.is_dir() else None)
 
     async def read(
         self, img: Image.Image, region: tuple[int, int, int, int] | None = None
@@ -26,14 +42,19 @@ class TesseractReader:
         self, img: Image.Image, region: tuple[int, int, int, int] | None
     ) -> list[TextBox]:
         origin_x = origin_y = 0
-        source = img
-        if region is not None:
+        if region is None:
+            gray = img.convert("L")
+        else:
             origin_x, origin_y, width, height = region
-            source = img.crop((origin_x, origin_y, origin_x + width, origin_y + height))
-        scaled = source.convert("L").resize((source.width * 2, source.height * 2), Image.Resampling.LANCZOS)
+            gray = _prepare(img.crop((origin_x, origin_y, origin_x + width, origin_y + height)))
+        scaled = gray.resize((gray.width * 2, gray.height * 2), Image.Resampling.LANCZOS)
         if self._tesseract_cmd:
             pytesseract.pytesseract.tesseract_cmd = self._tesseract_cmd
-        data = pytesseract.image_to_data(scaled, lang="spa+eng", output_type=Output.DICT)
+        tessdata_dir = self._tessdata_dir.replace("\\", "/") if self._tessdata_dir else None
+        config = f"--tessdata-dir {tessdata_dir}" if tessdata_dir else ""
+        data = pytesseract.image_to_data(
+            scaled, lang="spa+eng", config=config, output_type=Output.DICT
+        )
         lines: dict[tuple[int, int, int, int], list[tuple[str, int, int, int, int, float]]] = defaultdict(list)
         for index, raw_text in enumerate(data["text"]):
             text = raw_text.strip()

@@ -1,6 +1,7 @@
 """Reusable in-memory fakes for domain tests (no network, no real desktop)."""
 
 import copy
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -51,17 +52,26 @@ class FakeScreen:
 
 
 class FakeReader:
-    """Full-screen reads return `boxes`; region reads return `region_boxes` or boxes inside the region."""
+    """Full-screen reads return `boxes`; region reads return `region_fn(img, region)`, `region_boxes`
+    or the boxes inside the region, in that order of preference."""
 
-    def __init__(self, boxes: list[TextBox] | None = None, region_boxes: list[TextBox] | None = None) -> None:
+    def __init__(
+        self,
+        boxes: list[TextBox] | None = None,
+        region_boxes: list[TextBox] | None = None,
+        region_fn: Callable[[Image.Image, tuple[int, int, int, int]], list[TextBox]] | None = None,
+    ) -> None:
         self.boxes = boxes or []
         self.region_boxes = region_boxes
+        self.region_fn = region_fn
         self.calls: list[tuple[int, int] | tuple[int, int, int, int] | None] = []
 
     async def read(self, img: Image.Image, region: tuple[int, int, int, int] | None = None) -> list[TextBox]:
         self.calls.append(region)
         if region is None:
             return list(self.boxes)
+        if self.region_fn is not None:
+            return list(self.region_fn(img, region))
         if self.region_boxes is not None:
             return list(self.region_boxes)
         x, y, w, h = region
@@ -134,5 +144,23 @@ def tool_decision(*calls: tuple[str, dict[str, Any]], text: str = "") -> Decisio
     return Decision(tool_calls=tool_calls, text=text, stop_reason="tool_use", raw=tuple(raw))
 
 
+def overlaps(a: tuple[int, int, int, int], b: tuple[int, int, int, int]) -> bool:
+    """True when two (x, y, w, h) rectangles intersect."""
+    return a[0] < b[0] + b[2] and b[0] < a[0] + a[2] and a[1] < b[1] + b[3] and b[1] < a[1] + a[3]
+
+
 def text_decision(text: str) -> Decision:
     return Decision(text=text, stop_reason="end_turn", raw=({"type": "text", "text": text},))
+
+
+class RoutedModel(FakeModel):
+    """Computes each decision from the request, for scripts that must react to message content."""
+
+    def __init__(self, route: Callable[[str, list[Any], list[Any]], Decision]) -> None:
+        super().__init__([])
+        self.route = route
+
+    async def decide(self, system: str, messages: list[Any], tools: list[Any]) -> Decision:
+        self.requests.append({"system": system, "messages": copy.deepcopy(messages), "tools": tools})
+        self.live_messages.append(messages)
+        return self.route(system, messages, tools)

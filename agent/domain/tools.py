@@ -13,7 +13,7 @@ import numpy as np
 from PIL import Image
 
 from agent.domain.diff import changed_regions
-from agent.domain.guard import Guard
+from agent.domain.guard import Guard, label_at
 from agent.domain.models import TextBox, ToolCall
 from agent.ports.interfaces import Reader, Screen
 
@@ -31,6 +31,16 @@ EXACT_DIFF_MAX_PIXELS = 20_000
 DIFF_BLOCK = 8
 DIFF_THRESHOLD = 24
 MAX_REGIONS_REPORTED = 8
+MAX_RECORDED_STEPS = 15
+# Full-screen OCR merges adjacent buttons into one line and misses light-on-dark text, so the guard
+# reads a small crop around the click point instead.
+GUARD_CROP_W = 180
+GUARD_CROP_H = 34
+# After a commit, the text of what changed (toasts, dialogs) is read before it disappears.
+MAX_EVIDENCE_REGIONS = 6
+MAX_EVIDENCE_AREA = SCREEN_W * SCREEN_H // 2
+EVIDENCE_PAD_PX = 4
+MAX_EVIDENCE_CHARS = 300
 
 _COORDS = {
     "x": {"type": "integer", "description": "Horizontal pixel, 0-1279, from the left edge."},
@@ -197,6 +207,36 @@ class ToolOutcome:
     finish: dict[str, Any] | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class CommitEvidence:
+    """What the screen showed right after a commit: text of the changed regions and the screenshot."""
+
+    label: str
+    texts: tuple[str, ...]
+    image: Image.Image
+
+
+def guard_crop(x: int, y: int) -> tuple[int, int, int, int]:
+    """GUARD_CROP_W x GUARD_CROP_H rectangle centered on the point, clamped to the screen."""
+    left = min(max(0, x - GUARD_CROP_W // 2), SCREEN_W - GUARD_CROP_W)
+    top = min(max(0, y - GUARD_CROP_H // 2), SCREEN_H - GUARD_CROP_H)
+    return left, top, GUARD_CROP_W, GUARD_CROP_H
+
+
+def evidence_regions(regions: Sequence[tuple[int, int, int, int]]) -> list[tuple[int, int, int, int]]:
+    """Changed regions worth reading after a commit: not huge, largest first, padded and clamped."""
+    small = [r for r in regions if r[2] * r[3] <= MAX_EVIDENCE_AREA]
+    small.sort(key=lambda r: r[2] * r[3], reverse=True)
+    padded = []
+    for x, y, w, h in small[:MAX_EVIDENCE_REGIONS]:
+        left = max(0, x - EVIDENCE_PAD_PX)
+        top = max(0, y - EVIDENCE_PAD_PX)
+        right = min(SCREEN_W, x + w + EVIDENCE_PAD_PX)
+        bottom = min(SCREEN_H, y + h + EVIDENCE_PAD_PX)
+        padded.append((left, top, right - left, bottom - top))
+    return padded
+
+
 def image_block(image: Image.Image) -> dict[str, Any]:
     """PNG image as a Messages API content block (plain data)."""
     buffer = io.BytesIO()
@@ -301,6 +341,8 @@ class ToolBox:
         self._sleep = sleep
         self._image: Image.Image | None = None
         self._boxes: list[TextBox] = []
+        self._commit_evidence: list[CommitEvidence] = []
+        self.steps: list[str] = []
         self._step = 0
         self._handlers: dict[str, Callable[[dict[str, Any]], Awaitable[ToolOutcome]]] = {
             "click": self._click,
@@ -320,6 +362,10 @@ class ToolBox:
     @property
     def boxes(self) -> list[TextBox]:
         return list(self._boxes)
+
+    @property
+    def commit_evidence(self) -> list[CommitEvidence]:
+        return list(self._commit_evidence)
 
     def prime(self, image: Image.Image, boxes: list[TextBox]) -> None:
         self._image = image
@@ -406,7 +452,36 @@ class ToolBox:
         boxes = await self._reader.read(image, (left, top, width, height))
         return " | ".join(box.text for box in sorted(boxes, key=lambda b: b.x)) or "(vacío o ilegible)"
 
+    async def _target_boxes(self, x: int, y: int) -> Sequence[TextBox]:
+        """Boxes the guard judges a click with: a crop around the point, else the full-screen OCR."""
+        if self._image is None:
+            return self._boxes
+        crop = await self._reader.read(self._image, guard_crop(x, y))
+        if crop and label_at(x, y, crop):
+            return crop
+        return self._boxes
+
+    async def _collect_evidence(self, label: str, image: Image.Image) -> str:
+        """Read the regions a commit changed (toasts vanish quickly) and keep the screenshot."""
+        previous = self._image
+        regions = await asyncio.to_thread(screen_regions, previous, image) if previous is not None else []
+        texts: list[str] = []
+        for region in evidence_regions(regions):
+            boxes = await self._reader.read(image, region)
+            text = " ".join(box.text for box in sorted(boxes, key=lambda b: (b.y, b.x))).strip()
+            if text and text not in texts:
+                texts.append(text[:MAX_EVIDENCE_CHARS])
+        self._commit_evidence.append(CommitEvidence(label=label, texts=tuple(texts), image=image))
+        return f"\nMensajes tras confirmar: {' | '.join(texts)}" if texts else ""
+
     # --- handlers ----------------------------------------------------------------------------
+
+    def _record_step(self, step: str) -> None:
+        """Navigation log for procedure memory: no typed values, consecutive repeats collapsed, capped."""
+        if self.steps and self.steps[-1] == step:
+            return
+        if len(self.steps) < MAX_RECORDED_STEPS:
+            self.steps.append(step)
 
     def _blocked(self, reason: str) -> ToolOutcome:
         return ToolOutcome(text=f"{reason}\n{self._status_line()}", is_error=True)
@@ -417,23 +492,27 @@ class ToolBox:
         if button not in ("left", "right", "middle"):
             raise ToolInputError("'button' debe ser left, right o middle")
         double = _bool(args, "double", False)
-        verdict = self._guard.check_click(x, y, self._boxes)
+        verdict = self._guard.check_click(x, y, await self._target_boxes(x, y))
         if not verdict.allowed:
             return self._blocked(verdict.reason)
         since = self._clock()
         await self._screen.click(x, y, button, double)
+        if verdict.label:
+            self._record_step(f"click '{verdict.label}'")
         target = f" sobre '{verdict.label}'" if verdict.label else ""
         note = f"Clic en ({x},{y}){target}."
         image, changed = await self._settler.settle(since)
         if verdict.is_commit:
             self._guard.record_commit(verdict.label, changed)
             note += " Acción de confirmación registrada." if changed else " La confirmación no cambió la pantalla."
+            if changed:
+                note += await self._collect_evidence(verdict.label, image)
         else:
             self._guard.mark_verified()
         return await self._observation(image, note, changed)
 
-    def _check_field(self, x: int, y: int) -> None:
-        verdict = self._guard.check_click(x, y, self._boxes)
+    async def _check_field(self, x: int, y: int) -> None:
+        verdict = self._guard.check_click(x, y, await self._target_boxes(x, y))
         if verdict.is_commit:
             raise ToolInputError(
                 f"({x},{y}) está sobre '{verdict.label}', un botón de confirmación; no es un campo de texto"
@@ -443,9 +522,10 @@ class ToolBox:
         x, y = _point(args)
         text = _text(args, "text")
         replace = _bool(args, "replace", True)
-        self._check_field(x, y)
+        await self._check_field(x, y)
         since = self._clock()
         await self._fill(x, y, text, replace)
+        self._record_step("type into a field")
         self._guard.note_data_entry()
         image, changed = await self._settler.settle(since)
         read_back = await self._read_field(image, x, y)
@@ -468,10 +548,11 @@ class ToolBox:
             x, y = _point(field)
             parsed.append((x, y, _text(field, "value")))
         for x, y, _ in parsed:
-            self._check_field(x, y)
+            await self._check_field(x, y)
         since = self._clock()
         for x, y, value in parsed:
             await self._fill(x, y, value, True)
+        self._record_step(f"fill form ({len(parsed)} fields)")
         self._guard.note_data_entry()
         image, changed = await self._settler.settle(since)
         lines = ["Formulario llenado. Campos releídos:"]
@@ -488,6 +569,7 @@ class ToolBox:
             return self._blocked(verdict.reason)
         since = self._clock()
         await self._screen.key(combo)
+        self._record_step(f"key {combo}")
         self._guard.note_data_entry()
         outcome, _ = await self._observe_after(since, f"Tecla '{combo}' enviada.")
         return outcome
@@ -500,6 +582,7 @@ class ToolBox:
         steps = _int(args, "steps", 1, MAX_SCROLL_STEPS)
         since = self._clock()
         await self._screen.scroll(x, y, steps if direction == "up" else -steps)
+        self._record_step(f"scroll {direction}")
         self._guard.mark_verified()
         outcome, _ = await self._observe_after(since, f"Desplazamiento {direction} de {steps} pasos en ({x},{y}).")
         return outcome

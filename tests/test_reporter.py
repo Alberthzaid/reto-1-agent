@@ -6,8 +6,8 @@ from agent.domain.models import TaskResult, TaskStatus
 from agent.domain.reporter import build_summary, normalize_number
 from agent.observability import log_setup
 
-PASSWORD = "redaction-fixture-value"
-TOKEN = "desktop-token-fixture"
+AUTH_FIXTURE = "redaction-fixture-value"
+DESKTOP_TOKEN_FIXTURE = "desktop-auth-fixture"
 URL = "wss://desktop.example.test/websockify"
 
 
@@ -76,6 +76,13 @@ def test_done_lists_commits() -> None:
     assert "Guardar" in summary
 
 
+def test_summary_lists_the_crop_commit_label() -> None:
+    result = TaskResult(estado=TaskStatus.terminada, resumen="Cliente creado.", commits=("Guardar",))
+    summary = build_summary(result, [])
+    assert "Acciones confirmadas: Guardar" in summary
+    assert "Exportar" not in summary
+
+
 def test_empty_result_still_has_a_line() -> None:
     assert build_summary(TaskResult(estado=TaskStatus.fallida), []).strip()
 
@@ -84,11 +91,11 @@ def test_secrets_are_removed() -> None:
     log_setup.register_secret("registered-secret-fixture")
     result = TaskResult(
         estado=TaskStatus.fallida,
-        resumen=f"Conecté a {URL} con {PASSWORD} y token {TOKEN}; registered-secret-fixture",
-        datos_razon=(PASSWORD,),
+        resumen=f"Conecté a {URL} con {AUTH_FIXTURE} y token {DESKTOP_TOKEN_FIXTURE}; registered-secret-fixture",
+        datos_razon=(AUTH_FIXTURE,),
     )
-    summary = build_summary(result, [PASSWORD, TOKEN, URL, "desktop.example.test", ""])
-    for secret in (PASSWORD, TOKEN, URL, "desktop.example.test", "registered-secret-fixture"):
+    summary = build_summary(result, [AUTH_FIXTURE, DESKTOP_TOKEN_FIXTURE, URL, "desktop.example.test", ""])
+    for secret in (AUTH_FIXTURE, DESKTOP_TOKEN_FIXTURE, URL, "desktop.example.test", "registered-secret-fixture"):
         assert secret not in summary
 
 

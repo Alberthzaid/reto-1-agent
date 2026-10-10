@@ -1,10 +1,12 @@
+import logging
 from typing import Any
 
 import pytest
 
 from agent.domain.guard import Guard
-from agent.domain.models import Plan, TaskStatus, TextBox
-from agent.domain.policy import Orientation, Policy
+from agent.domain.dates import NO_DATE_NOTE
+from agent.domain.models import Plan, Procedure, TaskStatus, TextBox
+from agent.domain.policy import Orientation, Policy, describe_orientation
 from agent.domain.tools import ToolBox
 from tests.fakes import (
     FakeClock,
@@ -259,3 +261,56 @@ async def test_calls_after_finish_in_same_turn_are_not_executed() -> None:
     orientation, plan = await start(policy, screen, [HOY])
     await policy.run_plan(INSTRUCTION, plan, orientation, screen.image, [HOY])
     assert screen.actions == []
+
+
+def test_describe_orientation_adds_relative_dates_when_today_is_known() -> None:
+    text = describe_orientation(Orientation(today="10/10/2026", app="SIGECOM"))
+    assert "Yesterday" in text and "2026-10-09" in text and "09/10/2026" in text
+    assert NO_DATE_NOTE not in text
+
+
+def test_describe_orientation_warns_when_today_is_unknown() -> None:
+    assert NO_DATE_NOTE in describe_orientation(Orientation())
+
+
+@pytest.mark.asyncio
+async def test_orient_reads_long_header_date_without_model() -> None:
+    policy, model, screen, _, _ = make([])
+    header = TextBox(text="sábado, 10 de octubre de 2026", x=900, y=12, w=300, h=20)
+    orientation = await policy.orient(screen.image, [header, BUSCAR])
+    assert orientation.today == "10/10/2026"
+    assert model.requests == []
+
+
+@pytest.mark.asyncio
+async def test_orient_model_fallback_normalizes_today() -> None:
+    decision = tool_decision(("report_orientation", {"app": "X", "module": "Y", "today": "2026-10-10"}))
+    policy, _, screen, _, _ = make([decision])
+    assert (await policy.orient(screen.image, [BUSCAR])).today == "10/10/2026"
+
+
+@pytest.mark.asyncio
+async def test_hints_reach_the_first_execute_message(caplog: pytest.LogCaptureFixture) -> None:
+    script = [
+        tool_decision(("submit_plan", PLAN_INPUT)),
+        tool_decision(("click", {"x": 130, "y": 110})),
+        tool_decision(("finish", {"estado": "terminada", "resumen": "ok"})),
+    ]
+    policy, model, screen, _, _ = make(script)
+    orientation, plan = await start(policy, screen, [HOY])
+    hint = Procedure(app="a", intent="crear:cliente", steps=("click 'Clientes'", "click 'Nuevo'"),
+                     aprendizaje="Nuevo queda arriba.", exitos=1)
+    with caplog.at_level(logging.INFO, logger="agent.domain.policy"):
+        await policy.run_plan(INSTRUCTION, plan, orientation, screen.image, [HOY], hints=[hint])
+    first = str(model.requests[1]["messages"][0]["content"])
+    assert "Hints from previous tasks" in first and "click 'Nuevo'" in first and "Nuevo queda arriba." in first
+    assert "tarea terminada en 2 pasos" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_no_hints_block_without_hints() -> None:
+    script = [tool_decision(("submit_plan", PLAN_INPUT)), tool_decision(("finish", {"estado": "fallida", "resumen": "x"}))]
+    policy, model, screen, _, _ = make(script)
+    orientation, plan = await start(policy, screen, [HOY])
+    await policy.run_plan(INSTRUCTION, plan, orientation, screen.image, [HOY])
+    assert "Hints from previous tasks" not in str(model.requests[1]["messages"][0]["content"])

@@ -3,7 +3,7 @@
 import asyncio
 import logging
 import time
-from collections.abc import Awaitable, Callable, Iterable
+from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import replace
 from typing import Protocol, runtime_checkable
 from urllib.parse import urlparse
@@ -11,14 +11,15 @@ from urllib.parse import urlparse
 from agent.config import Settings
 from agent.domain.budget import task_deadline
 from agent.domain.guard import Guard
-from agent.domain.models import TaskResult, TaskStatus
+from agent.domain.models import Plan, Procedure, TaskResult, TaskStatus, TextBox
 from agent.domain.policy import Policy
+from agent.domain.procedures import intent_key, sanitize_steps, sanitize_text
 from agent.domain.reporter import build_summary
 from agent.domain.settler import Settler
 from agent.domain.tools import Settles, ToolBox, TraceSink
 from agent.domain.verifier import Verifier
 from agent.infra.vnc.keys import BLOCKED_COMBOS
-from agent.ports.interfaces import Model, Reader, Screen
+from agent.ports.interfaces import Classifier, Memory, Model, Reader, Screen
 
 log = logging.getLogger(__name__)
 
@@ -58,6 +59,8 @@ class AgentWorker:
         settler_factory: Callable[[Screen], Settles] = Settler,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         first_frame_timeout: float = FIRST_FRAME_TIMEOUT_S,
+        classifier: Classifier | None = None,
+        memory: Memory | None = None,
     ) -> None:
         self._instruction = instruction
         self._url = url
@@ -72,6 +75,8 @@ class AgentWorker:
         self._settler_factory = settler_factory
         self._sleep = sleep
         self._first_frame_timeout = first_frame_timeout
+        self._classifier = classifier
+        self._memory = memory
         self._guard = Guard(blocked_combos, planned_commits=0)
         self._screen: Screen | None = None
         self._closed = False
@@ -104,7 +109,19 @@ class AgentWorker:
     async def _run(self, hard_deadline: float) -> TaskResult:
         screen = self._screen_factory()
         self._screen = screen
-        await screen.connect(self._url, self._password)
+        classification_task = (
+            asyncio.create_task(self._classifier.classify(self._instruction))
+            if self._classifier is not None
+            else None
+        )
+        try:
+            await screen.connect(self._url, self._password)
+            classification = await classification_task if classification_task is not None else None
+        except BaseException:
+            if classification_task is not None:
+                classification_task.cancel()
+                await asyncio.gather(classification_task, return_exceptions=True)
+            raise
         if not await self._wait_first_frame(screen):
             return TaskResult(estado=TaskStatus.fallida, resumen="No se recibió la imagen del escritorio.")
         trace = self._make_trace()
@@ -114,26 +131,85 @@ class AgentWorker:
             trace=trace, deadline=exec_deadline, sleep=self._sleep,
         )
         image, boxes = await toolbox.observe()
-        policy = Policy(self._model_fast, toolbox, self._guard, self._clock, exec_deadline)
+        policy = Policy(
+            self._model_fast,
+            toolbox,
+            self._guard,
+            self._clock,
+            exec_deadline,
+            classification=classification,
+        )
+        app = self._fingerprint(boxes)
         orientation = await policy.orient(image, boxes)
         plan = await policy.plan(self._instruction, orientation, image, boxes)
-        result = await policy.run_plan(self._instruction, plan, orientation, image, boxes)
+        intent = intent_key(plan)
+        hints = await self._recall(app, intent) if plan.feasible else []
+        result = await policy.run_plan(self._instruction, plan, orientation, image, boxes, hints=hints)
         if result.estado is not TaskStatus.terminada:
+            await self._penalize(app, intent, hints)
             return result
         final_image, final_boxes = await toolbox.observe()
         claim = "; ".join(filter(None, [result.resumen, "respuesta: " + "; ".join(result.respuesta)
                                         if result.respuesta else ""]))
         confirmed, evidence = await Verifier(self._model_strong).confirm(
-            plan, self._instruction, final_image, final_boxes, claim=claim
+            plan, self._instruction, final_image, final_boxes, claim=claim,
+            evidence=toolbox.commit_evidence,
         )
         if confirmed:
+            await self._remember(app, intent, plan, toolbox.steps, result)
             return result
         log.info("el verificador no confirmó el resultado")
+        await self._penalize(app, intent, hints)
         return replace(
             result,
             estado=TaskStatus.fallida,
             resumen=f"No se pudo confirmar el resultado en pantalla: {evidence}",
         )
+
+    # --- procedure memory: failures are logged and never change the task result -----------------
+
+    def _fingerprint(self, boxes: list[TextBox]) -> str | None:
+        if self._memory is None:
+            return None
+        try:
+            return self._memory.fingerprint(boxes)
+        except Exception:
+            log.exception("no se pudo identificar la aplicación para la memoria de procedimientos")
+            return None
+
+    async def _recall(self, app: str | None, intent: str) -> list[Procedure]:
+        if self._memory is None or app is None:
+            return []
+        try:
+            return list(await self._memory.procedures(app, intent))
+        except Exception:
+            log.exception("no se pudieron leer los procedimientos guardados")
+            return []
+
+    async def _remember(
+        self, app: str | None, intent: str, plan: Plan, steps: Sequence[str], result: TaskResult
+    ) -> None:
+        if self._memory is None or app is None:
+            return
+        try:
+            secrets = self._secrets
+            procedure = Procedure(
+                app=app,
+                intent=intent,
+                steps=sanitize_steps(steps, plan, secrets),
+                aprendizaje=sanitize_text(result.aprendizaje, plan, secrets),
+            )
+            await self._memory.save_procedure(app, procedure)
+        except Exception:
+            log.exception("no se pudo guardar el procedimiento")
+
+    async def _penalize(self, app: str | None, intent: str, hints: Sequence[Procedure]) -> None:
+        if self._memory is None or app is None or not hints:
+            return
+        try:
+            await self._memory.penalize(app, intent, hints)
+        except Exception:
+            log.exception("no se pudieron penalizar los procedimientos usados")
 
     async def _wait_first_frame(self, screen: Screen) -> bool:
         limit = self._clock() + self._first_frame_timeout

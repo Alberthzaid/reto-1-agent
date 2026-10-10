@@ -14,3 +14,4 @@ How to work:
 - Dates such as "hoy", "ayer" or "este mes" are relative to the date the app shows in its header ("Hoy: dd/mm/yyyy"), not to your own knowledge.
 - Before calling `finish` with `terminada`, leave the evidence visible on screen (the saved record, the updated field, the answer) and confirm it with your own eyes in the last screenshot.
 - Write `resumen` in Spanish, 1-3 short sentences. Never include passwords, tokens or URLs.
+- Hints from previous tasks are only suggestions: confirm each menu or button on screen before following them. In `finish.aprendizaje` describe only navigation (menus, buttons, order of steps), never customer data (names, ids, values).

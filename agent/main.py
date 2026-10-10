@@ -11,17 +11,21 @@ from agent.application.manager import TaskManager, WorkerFactory
 from agent.application.worker import AgentWorker, DummyWorker, Worker
 from agent.config import Settings
 from agent.infra.llm_model import ClaudeModel, build_client, supports_server_fallbacks
+from agent.infra.falco_classifier import FalcoClassifier
 from agent.infra.sqlite_memory import SqliteMemory
 from agent.infra.tesseract_ocr import TesseractReader
 from agent.infra.vnc.keys import BLOCKED_COMBOS
 from agent.infra.vnc.vnc_screen import VncScreen
 from agent.observability.log_setup import register_secret, setup_logging
 from agent.observability.traces import TraceWriter
+from agent.ports.interfaces import Memory
 
 log = logging.getLogger(__name__)
 
 
-def build_worker_factory(settings: Settings) -> WorkerFactory:
+def build_worker_factory(
+    settings: Settings, classifier: FalcoClassifier, memory: Memory | None = None
+) -> WorkerFactory:
     """Real agent workers when an API key is configured; otherwise the deterministic DummyWorker."""
     if not settings.anthropic_api_key:
         log.warning("ANTHROPIC_API_KEY no está configurada: se usa DummyWorker y no se opera el escritorio")
@@ -45,6 +49,8 @@ def build_worker_factory(settings: Settings) -> WorkerFactory:
             VncScreen,
             trace_factory=lambda: TraceWriter(uuid.uuid4().hex, data_dir),
             blocked_combos=BLOCKED_COMBOS,
+            classifier=classifier,
+            memory=memory,
         )
 
     return factory
@@ -57,10 +63,16 @@ for _secret in (settings.anthropic_api_key, settings.team_token, settings.deskto
     register_secret(_secret)
 
 memory = SqliteMemory(Path(settings.data_dir) / "agent.db")
+falco = FalcoClassifier(settings.falco_enabled, settings.falco_model_dir)
 manager = TaskManager(
     memory=memory,
-    worker_factory=build_worker_factory(settings),
+    worker_factory=build_worker_factory(settings, falco, memory),
     time_limit_sec=settings.time_limit_sec,
     max_concurrent_tasks=settings.max_concurrent_tasks,
 )
-app = create_app(manager, settings.team_token)
+app = create_app(
+    manager,
+    settings.team_token,
+    startup_services=(falco.start,),
+    shutdown_services=(falco.stop,),
+)

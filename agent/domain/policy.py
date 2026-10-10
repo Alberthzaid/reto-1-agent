@@ -2,23 +2,26 @@
 
 import asyncio
 import logging
-import re
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
 from PIL import Image
 
+from agent.domain.dates import NO_DATE_NOTE, parse_app_date, parse_date, relative_context
 from agent.domain.guard import Guard
-from agent.domain.models import Decision, Plan, TaskResult, TaskStatus, TextBox, ToolCall
+from agent.domain.models import (
+    Classification, Decision, Plan, Procedure, TaskResult, TaskStatus, TextBox, ToolCall,
+)
+from agent.domain.procedures import describe_hints
 from agent.domain.tools import TOOL_SPECS, ToolBox, image_block, ocr_listing
 from agent.ports.interfaces import Model
 
 log = logging.getLogger(__name__)
 
 PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
-TODAY_RE = re.compile(r"Hoy:\s*(\d{2}/\d{2}/\d{4})", re.IGNORECASE)
+APP_DATE_FORMAT = "%d/%m/%Y"
 MAX_PLANNED_COMMITS = 3
 MIN_TURN_S = 3.0
 PLAN_KINDS = ["crear", "modificar", "eliminar", "consultar", "exportar", "otro"]
@@ -109,7 +112,11 @@ def describe_plan(plan: Plan) -> str:
 
 def describe_orientation(orientation: Orientation) -> str:
     today = orientation.today or "unknown"
-    return f"Today (date shown by the app): {today}\nApp: {orientation.app or '?'}; module: {orientation.module or '?'}"
+    text = f"Today (date shown by the app): {today}\nApp: {orientation.app or '?'}; module: {orientation.module or '?'}"
+    parsed = parse_date(orientation.today) if orientation.today else None
+    if parsed is None:
+        return f"{text}\n{NO_DATE_NOTE}"
+    return f"{text}\nRelative dates computed from the app's today:\n{relative_context(parsed)}"
 
 
 async def screen_content(text: str, image: Image.Image, boxes: Sequence[TextBox]) -> list[dict[str, Any]]:
@@ -130,6 +137,7 @@ class Policy:
         prompts_dir: Path = PROMPTS_DIR,
         max_turns: int = 40,
         finish_margin: float = 40.0,
+        classification: Classification | None = None,
     ) -> None:
         self._model = model
         self._toolbox = toolbox
@@ -139,14 +147,15 @@ class Policy:
         self._prompts_dir = prompts_dir
         self._max_turns = max_turns
         self._finish_margin = finish_margin
+        self._classification = classification
 
     def _remaining(self) -> float:
         return self._deadline - self._clock()
 
     async def orient(self, image: Image.Image, boxes: Sequence[TextBox]) -> Orientation:
-        match = TODAY_RE.search("\n".join(box.text for box in boxes))
-        if match:
-            return Orientation(today=match.group(1))
+        app_date = parse_app_date(boxes)
+        if app_date is not None:
+            return Orientation(today=app_date.strftime(APP_DATE_FORMAT))
         content = await screen_content("First screenshot of the application.", image, boxes)
         try:
             decision = await self._model.decide(
@@ -158,9 +167,9 @@ class Policy:
         call = first_call(decision, "report_orientation")
         if call is None:
             return Orientation()
-        today = str(call.input.get("today", "")).strip()
+        today = parse_date(str(call.input.get("today", "")))
         return Orientation(
-            today=today if re.fullmatch(r"\d{2}/\d{2}/\d{4}", today) else None,
+            today=today.strftime(APP_DATE_FORMAT) if today is not None else None,
             app=str(call.input.get("app", "")),
             module=str(call.input.get("module", "")),
         )
@@ -168,9 +177,9 @@ class Policy:
     async def plan(
         self, instruction: str, orientation: Orientation, image: Image.Image, boxes: Sequence[TextBox]
     ) -> Plan:
-        text = f"Task: {instruction}\n{describe_orientation(orientation)}"
+        text = f"Task: {instruction}\n{describe_orientation(orientation)}{self._planning_hint()}"
         messages: list[Any] = [{"role": "user", "content": await screen_content(text, image, boxes)}]
-        system = load_prompt("plan", self._prompts_dir)
+        system = load_prompt("plan", self._prompts_dir) + self._planning_hint()
         for attempt in range(2):
             try:
                 decision = await self._model.decide(system, messages, [SUBMIT_PLAN])
@@ -180,6 +189,7 @@ class Policy:
             call = first_call(decision, "submit_plan")
             if call is not None:
                 plan = self._to_plan(call.input)
+                plan = self._apply_caution(plan)
                 if plan.feasible:
                     self._guard.planned_commits = plan.planned_commits
                 return plan
@@ -219,6 +229,30 @@ class Policy:
             expected_evidence=str(data.get("expected_evidence", "")),
         )
 
+    def _planning_hint(self) -> str:
+        hint = self._classification
+        if hint is None:
+            return ""
+        notes: list[str] = []
+        if hint.task_type:
+            notes.append(f"Falco advisory phase hint: {hint.task_type}. Validate it against the task.")
+        if hint.destructive is True:
+            notes.append(
+                "Falco advisory: this may be destructive. Require explicit confirmation of the exact scope "
+                "on screen before any commit; do not relax any precondition or verification."
+            )
+        if hint.two_data is True:
+            notes.append("Falco advisory: the final respuesta must contain exactly two values formatted as A; B.")
+        return "\n\n" + "\n".join(notes) if notes else ""
+
+    def _apply_caution(self, plan: Plan) -> Plan:
+        if self._classification is None or self._classification.destructive is not True:
+            return plan
+        scope_check = "confirmar en pantalla el alcance exacto antes de cualquier commit"
+        if scope_check in plan.preconditions:
+            return plan
+        return replace(plan, preconditions=(*plan.preconditions, scope_check))
+
     async def run_plan(
         self,
         instruction: str,
@@ -226,10 +260,11 @@ class Policy:
         orientation: Orientation,
         image: Image.Image,
         boxes: Sequence[TextBox],
+        hints: Sequence[Procedure] = (),
     ) -> TaskResult:
         if not plan.feasible:
             return TaskResult(estado=TaskStatus.fallida, resumen=plan.reason or "La tarea no es realizable.")
-        return await self.execute(instruction, plan, orientation, image, boxes)
+        return await self.execute(instruction, plan, orientation, image, boxes, hints)
 
     def _failed(self, resumen: str) -> TaskResult:
         return TaskResult(estado=TaskStatus.fallida, resumen=resumen, commits=self._guard.commits)
@@ -241,12 +276,19 @@ class Policy:
         orientation: Orientation,
         image: Image.Image,
         boxes: Sequence[TextBox],
+        hints: Sequence[Procedure] = (),
     ) -> TaskResult:
         system = load_prompt("system", self._prompts_dir)
-        intro = f"Task: {instruction}\n{describe_orientation(orientation)}\n\nPlan:\n{describe_plan(plan)}"
+        intro = (
+            f"Task: {instruction}\n{describe_orientation(orientation)}\n\nPlan:\n{describe_plan(plan)}"
+            f"{self._planning_hint()}"
+        )
+        hint_text = describe_hints(hints)
+        if hint_text:
+            intro = f"{intro}\n\n{hint_text}"
         messages: list[Any] = [{"role": "user", "content": await screen_content(intro, image, boxes)}]
         nudged = False
-        for _ in range(self._max_turns):
+        for turn in range(1, self._max_turns + 1):
             if self._remaining() < MIN_TURN_S:
                 return self._timed_out()
             try:
@@ -266,6 +308,7 @@ class Policy:
                 continue
             results, finish = await self._run_calls(decision.tool_calls)
             if finish is not None:
+                log.info("tarea terminada en %d pasos", turn)
                 return self._finished(finish)
             if self._remaining() <= 0:
                 return self._timed_out()

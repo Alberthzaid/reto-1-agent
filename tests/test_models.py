@@ -100,6 +100,13 @@ def test_plan_defaults_and_fields() -> None:
     assert plan.feasible is True and plan.planned_commits == 0 and plan.values == ()
 
 
+def test_procedure_holds_navigation_text_learning_and_successes() -> None:
+    assert [f.name for f in dataclasses.fields(Procedure)] == ["app", "intent", "steps", "aprendizaje", "exitos"]
+    proc = Procedure(app="a", intent="crear:cliente")
+    assert proc.steps == () and proc.aprendizaje == "" and proc.exitos == 0
+    assert get_type_hints(Procedure)["steps"] == tuple[str, ...]
+
+
 def test_task_result_fields() -> None:
     result = TaskResult(estado=TaskStatus.fallida, resumen="x", datos_razon=("52345678",))
     assert [f.name for f in dataclasses.fields(TaskResult)] == [
@@ -182,7 +189,7 @@ async def test_classifier_may_return_none() -> None:
     [
         (Reader, {"read"}),
         (Model, {"decide"}),
-        (Memory, {"fingerprint", "procedures", "save_procedure", "save_task", "load_task",
+        (Memory, {"fingerprint", "procedures", "save_procedure", "penalize", "save_task", "load_task",
                   "mark_stale_running_as_failed"}),
         (Classifier, {"classify"}),
         (Screen, {"connect", "screenshot", "click", "type_text", "key", "scroll", "last_change_ts", "close"}),

@@ -1,5 +1,6 @@
-"""Independent end-of-task check with the strong model on a fresh screenshot."""
+"""Independent end-of-task check with the strong model on a fresh screenshot plus post-commit evidence."""
 
+import asyncio
 import logging
 from collections.abc import Sequence
 from pathlib import Path
@@ -9,9 +10,12 @@ from PIL import Image
 
 from agent.domain.models import Plan, TextBox
 from agent.domain.policy import PROMPTS_DIR, describe_plan, first_call, load_prompt, screen_content
+from agent.domain.tools import CommitEvidence, image_block
 from agent.ports.interfaces import Model
 
 log = logging.getLogger(__name__)
+
+MAX_EVIDENCE_SHOTS = 3
 
 VERDICT: dict[str, Any] = {
     "name": "verdict",
@@ -43,12 +47,32 @@ class Verifier:
         image: Image.Image,
         boxes: Sequence[TextBox],
         claim: str = "",
+        evidence: Sequence[CommitEvidence] = (),
     ) -> tuple[bool, str]:
+        shots = list(evidence)[-MAX_EVIDENCE_SHOTS:]
+        question = (
+            "Do this screenshot and the post-commit captures below confirm exactly the expected evidence?"
+            if shots
+            else "Does this screenshot confirm exactly the expected evidence?"
+        )
         text = (
             f"Task: {instruction}\n\nPlan:\n{describe_plan(plan)}\n\n"
-            f"Agent claim: {claim or '(none)'}\n\nDoes this screenshot confirm exactly the expected evidence?"
+            f"Agent claim: {claim or '(none)'}\n\n"
+            f"The first image is a fresh screenshot taken now. {question}"
         )
         content = await screen_content(text, image, boxes)
+        for shot in shots:
+            texts = " | ".join(shot.texts) or "(no text read)"
+            content.append(
+                {
+                    "type": "text",
+                    "text": (
+                        f"Screenshot taken right after the commit '{shot.label}'. "
+                        f"Text read in the regions that changed: {texts}"
+                    ),
+                }
+            )
+            content.append(await asyncio.to_thread(image_block, shot.image))
         try:
             decision = await self._model.decide(
                 load_prompt("verify", self._prompts_dir), [{"role": "user", "content": content}], [VERDICT]
