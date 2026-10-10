@@ -1,15 +1,16 @@
 """VncScreen behaviour against the mock RFB server (timings kept tolerant)."""
 
 import asyncio
+import struct
 
 import pytest
-from PIL import Image
+from PIL import Image, ImageChops
 
 from websockets.protocol import State
 
 import agent.infra.vnc.vnc_screen as vnc_screen_module
 from agent.infra.vnc.keys import BlockedKeyError, keysym
-from agent.infra.vnc.rfb import RFBConnectionError, RFBError
+from agent.infra.vnc.rfb import RFBConnectionError, RFBError, RFBProtocolError
 from agent.infra.vnc.vnc_screen import VncScreen
 from agent.ports.interfaces import Screen
 from dev_tools.mock_vnc_server import MockVncServer
@@ -312,5 +313,46 @@ async def test_value_error_does_not_close_client() -> None:
                 await screen.key("ctrl+w")
             assert screen._client is not None
             assert (await screen.screenshot()).size == (1280, 800)
+        finally:
+            await screen.close()
+
+
+@pytest.mark.asyncio
+async def test_reader_dying_with_non_rfb_error_surfaces_protocol_error_and_closes() -> None:
+    async with MockVncServer(PASSWORD, width=64, height=48) as server:
+        screen = await open_screen(server)
+        client = screen._client
+        assert client is not None and client._ws is not None and client._task is not None
+        ws, task = client._ws, client._task
+        # a Raw rect wider than the screen cannot be broadcast into the framebuffer: numpy raises ValueError
+        bad = struct.pack(">BxH", 0, 1) + struct.pack(">HHHHi", 0, 0, 100, 1, 0) + bytes(400)
+        await server.inject_raw(bad)
+        await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), 5)
+        assert isinstance(task.exception(), ValueError)
+        with pytest.raises(RFBProtocolError) as info:
+            await screen.screenshot()
+        assert isinstance(info.value.__cause__, ValueError)
+        assert PASSWORD not in str(info.value)
+        assert screen._client is None
+        assert ws.state is State.CLOSED
+
+
+@pytest.mark.asyncio
+async def test_key_through_screen_draws_on_mock_framebuffer() -> None:
+    async with MockVncServer(PASSWORD, width=64, height=48) as server:
+        screen = await open_screen(server)
+        try:
+            before = await screen.screenshot()
+            first = screen.last_change_ts()
+            await screen.key("a")
+            for _ in range(250):
+                if screen.last_change_ts() > first:
+                    break
+                await asyncio.sleep(0.02)
+            else:
+                raise AssertionError("no repaint after key")
+            after = await screen.screenshot()
+            assert ImageChops.difference(before, after).getbbox() is not None
+            assert ImageChops.difference(after, await screen.screenshot()).getbbox() is None
         finally:
             await screen.close()

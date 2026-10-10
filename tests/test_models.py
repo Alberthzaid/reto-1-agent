@@ -3,6 +3,7 @@ import dataclasses
 import inspect
 from datetime import timedelta
 from pathlib import Path
+from typing import get_type_hints
 
 import pytest
 from PIL import Image
@@ -148,3 +149,19 @@ async def test_classifier_may_return_none() -> None:
 def test_port_members(proto: type, members: set[str]) -> None:
     public = {n for n in vars(proto) if not n.startswith("_")}
     assert members == public
+
+
+@pytest.mark.parametrize(
+    "proto,method,expected",
+    [
+        (Reader, "read", list[TextBox]),
+        (Model, "decide", Decision),
+        (Classifier, "classify", Classification | None),
+        (Screen, "screenshot", Image.Image),
+        (Screen, "last_change_ts", float),
+        (Screen, "click", type(None)),
+        (Screen, "close", type(None)),
+    ],
+)
+def test_port_return_annotations(proto: type, method: str, expected: object) -> None:
+    assert get_type_hints(getattr(proto, method))["return"] == expected

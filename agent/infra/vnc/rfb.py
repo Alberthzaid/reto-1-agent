@@ -253,8 +253,12 @@ class RFBClient:
         if self._ws is None or self._task is None:
             raise RFBError("el cliente RFB no está conectado")
         if self._task.done() and not self._task.cancelled():
-            self._task.result()  # re-raises the loop's exception
-            raise RFBConnectionError("el lector RFB terminó")
+            exc = self._task.exception()
+            if exc is None:
+                raise RFBConnectionError("el lector RFB terminó")
+            if isinstance(exc, RFBError):
+                raise exc
+            raise RFBProtocolError(f"el lector RFB falló ({type(exc).__name__})") from exc
 
     async def request_update(self, incremental: bool) -> None:
         await self._send(pack_update_request(incremental, 0, 0, self.width, self.height))

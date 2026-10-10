@@ -1,5 +1,6 @@
 """record_screens against the mock server only (never the real desktop)."""
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -34,3 +35,25 @@ def test_main_without_env_returns_2_and_skips_connection(
     monkeypatch.delenv("DESKTOP_PASSWORD", raising=False)
     assert record_screens.main() == 2
     assert "DESKTOP_URL" in caplog.text and "DESKTOP_PASSWORD" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_record_defaults_to_data_screens(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    async with MockVncServer(PASSWORD, width=64, height=48) as server:
+        path = await record_screens.record(server.url, PASSWORD)
+    assert path.parent == Path("data") / "screens"
+    assert [p.name for p in (tmp_path / "data" / "screens").glob("*.png")] == [path.name]
+
+
+@pytest.mark.asyncio
+async def test_main_uses_env_and_default_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(record_screens, "load_dotenv", lambda *a, **k: False)
+    monkeypatch.setattr(record_screens, "setup_logging", lambda *a, **k: None)
+    async with MockVncServer(PASSWORD, width=64, height=48) as server:
+        monkeypatch.setenv("DESKTOP_URL", server.url)
+        monkeypatch.setenv("DESKTOP_PASSWORD", PASSWORD)
+        code = await asyncio.to_thread(record_screens.main)
+    assert code == 0
+    assert len(list((tmp_path / "data" / "screens").glob("*.png"))) == 1
