@@ -21,14 +21,26 @@ class FakeScreen:
         self.change_ts = change_ts
         self.connected: tuple[str, str] | None = None
         self.close_calls = 0
+        self.reconnect_calls = 0
+        self.drop_on: set[str] = set()  # operations that raise ConnectionError once ("click", "connect", ...)
+
+    def _maybe_drop(self, operation: str) -> None:
+        if operation in self.drop_on:
+            self.drop_on.discard(operation)
+            raise ConnectionError("conexión cerrada por el servidor")
+
+    async def reconnect(self) -> None:
+        self.reconnect_calls += 1
 
     async def connect(self, url: str, password: str) -> None:
+        self._maybe_drop("connect")
         self.connected = (url, password)
 
     async def screenshot(self) -> Image.Image:
         return self.image.copy()
 
     async def click(self, x: int, y: int, button: str = "left", double: bool = False) -> None:
+        self._maybe_drop("click")
         self.actions.append(("click", x, y, button, double))
 
     async def type_text(self, text: str) -> None:

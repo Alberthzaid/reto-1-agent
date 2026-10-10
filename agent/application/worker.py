@@ -27,6 +27,8 @@ from agent.ports.interfaces import Classifier, Memory, Model, Reader, Screen
 log = logging.getLogger(__name__)
 
 FIRST_FRAME_TIMEOUT_S = 30.0
+CONNECT_ATTEMPTS = 3
+CONNECT_PAUSE_S = 2.0
 SCREEN_WIDTH = 1280
 HEADER_BAND_PX = 64  # title bar plus top menu, read as a region so dark overlays are inverted
 FIRST_FRAME_POLL_S = 0.2
@@ -148,7 +150,7 @@ class AgentWorker:
             else None
         )
         try:
-            await screen.connect(self._url, self._password)
+            await self._connect(screen)
             classification = await classification_task if classification_task is not None else None
         except BaseException:
             if classification_task is not None:
@@ -301,6 +303,18 @@ class AgentWorker:
             log.exception("no se pudo registrar el fallo de la repetición desde memoria")
         if penalize:
             await self._penalize(app, intent, [used])
+
+    async def _connect(self, screen: Screen) -> None:
+        """The desktop may drop the first handshake right after a reset (its browser restarts): retry."""
+        for attempt in range(1, CONNECT_ATTEMPTS + 1):
+            try:
+                await screen.connect(self._url, self._password)
+                return
+            except ConnectionError:
+                if attempt == CONNECT_ATTEMPTS:
+                    raise
+                log.warning("no se pudo conectar al escritorio (intento %d); se reintenta", attempt)
+                await self._sleep(CONNECT_PAUSE_S)
 
     async def _app_key(self, image: Any, boxes: list[TextBox]) -> str | None:
         """Memory key: the app name read from the title bar region (readable even under a modal that

@@ -155,7 +155,7 @@ def test_screen_signature() -> None:
     assert list(inspect.signature(Screen.close).parameters) == ["self"]
     methods = {n for n, v in vars(Screen).items() if inspect.isfunction(v) and not n.startswith("_")}
     assert methods == {
-        "connect", "screenshot", "click", "type_text", "key", "scroll", "last_change_ts", "close",
+        "connect", "screenshot", "click", "type_text", "key", "scroll", "last_change_ts", "close", "reconnect",
     }
 
 
@@ -170,6 +170,7 @@ class FakeScreen:
     def last_change_ts(self) -> float:
         return 0.0
     async def close(self) -> None: ...
+    async def reconnect(self) -> None: ...
 
 
 class FakeNoClassifier:
@@ -196,7 +197,7 @@ async def test_classifier_may_return_none() -> None:
         (Memory, {"fingerprint", "procedures", "save_procedure", "penalize", "save_task", "load_task",
                   "list_tasks", "mark_stale_running_as_failed", "record_replay"}),
         (Classifier, {"classify"}),
-        (Screen, {"connect", "screenshot", "click", "type_text", "key", "scroll", "last_change_ts", "close"}),
+        (Screen, {"connect", "screenshot", "click", "type_text", "key", "scroll", "last_change_ts", "close", "reconnect"}),
     ],
 )
 def test_port_members(proto: type, members: set[str]) -> None:

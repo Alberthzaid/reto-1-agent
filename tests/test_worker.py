@@ -727,3 +727,13 @@ async def test_app_is_keyed_by_header_name_even_when_a_modal_hides_it_from_full_
     status, _ = await worker.run()
     assert status is TaskStatus.terminada
     assert [p.exitos for p in await memory.procedures("sigecom", INTENT)] == [1]
+
+
+@pytest.mark.asyncio
+async def test_initial_connection_is_retried() -> None:
+    screen = FakeScreen()
+    screen.drop_on.add("connect")
+    worker, _, _, _ = build(HAPPY_FAST, [CONFIRM], screen=screen)
+    status, _ = await worker.run()
+    assert status is TaskStatus.terminada
+    assert screen.connected is not None

@@ -35,6 +35,14 @@ DIFF_BLOCK = 8
 DIFF_THRESHOLD = 24
 MAX_REGIONS_REPORTED = 8
 MAX_RECORDED_STEPS = 15
+RECONNECT_ATTEMPTS = 2
+RECONNECT_MIN_S = 10.0  # do not reconnect when the task is about to run out of time
+RECONNECT_PAUSE_S = 1.5
+RECONNECTED_NOTE = (
+    "Se perdió la conexión con el escritorio durante '{tool}' y se restableció. La acción pudo aplicarse o no: "
+    "mira la pantalla actual antes de seguir y no repitas una confirmación (guardar, aplicar, eliminar...) "
+    "sin comprobar primero si ya quedó hecha."
+)
 # Replayable script recorded next to the step texts (procedure memory). Typed text must be one of the
 # plan values, recorded by field name; anything else voids the script.
 MAX_SCRIPT_STEPS = 40
@@ -683,8 +691,12 @@ class ToolBox:
         self._boxes = list(boxes)
 
     async def observe(self) -> tuple[Image.Image, list[TextBox]]:
-        """Fresh screenshot and full OCR (no action)."""
-        image = await self._screen.screenshot()
+        """Fresh screenshot and full OCR (no action); reconnects once if the desktop dropped the link."""
+        try:
+            image = await self._screen.screenshot()
+        except ConnectionError:
+            await self._reconnect()
+            image = await self._screen.screenshot()
         boxes = await self._reader.read(image)
         self.prime(image, boxes)
         return image, list(boxes)
@@ -698,6 +710,22 @@ class ToolBox:
     def remaining(self) -> float | None:
         return None if self.deadline is None else self.deadline - self._clock()
 
+    async def _reconnect(self) -> None:
+        """Reconnect to the desktop, a few attempts while there is time left; re-raise when it stays down."""
+        last: ConnectionError | None = None
+        for attempt in range(1, RECONNECT_ATTEMPTS + 1):
+            remaining = self.remaining()
+            if remaining is not None and remaining < RECONNECT_MIN_S:
+                break
+            try:
+                await self._screen.reconnect()
+                log.warning("conexión con el escritorio restablecida (intento %d)", attempt)
+                return
+            except ConnectionError as exc:
+                last = exc
+                await self._sleep(RECONNECT_PAUSE_S)
+        raise last or ConnectionError("se perdió la conexión con el escritorio")
+
     async def execute(self, call: ToolCall) -> ToolOutcome:
         handler = self._handlers.get(call.name)
         if handler is None:
@@ -705,6 +733,13 @@ class ToolBox:
         args = call.input if isinstance(call.input, dict) else {}
         try:
             outcome = await handler(args)
+        except ConnectionError:
+            # The desktop dropped the VNC link (e.g. its browser restarted). Reconnect and let the model look
+            # again: the action may or may not have reached the app, so it must not be repeated blindly.
+            await self._reconnect()
+            image, _ = await self.settle_and_observe()
+            outcome = await self._observation(image, RECONNECTED_NOTE.format(tool=call.name))
+            outcome = ToolOutcome(text=outcome.text, image=outcome.image, is_error=True)
         except ToolInputError as exc:
             outcome = ToolOutcome(text=f"Entrada inválida para {call.name}: {exc}", is_error=True)
         except ValueError as exc:

@@ -32,6 +32,8 @@ class Screen(Protocol):
 
     async def close(self) -> None: ...
 
+    async def reconnect(self) -> None: ...
+
 
 @runtime_checkable
 class Reader(Protocol):

@@ -22,6 +22,7 @@ CLICK_HOLD_S = 0.15  # the desktop ignores presses shorter than ~100 ms
 DOUBLE_CLICK_GAP_S = 0.08
 KEY_INTERVAL_S = 0.0175  # 15-20 ms between typed events
 SCROLL_STEP_S = 0.03
+RECONNECT_FRAME_TIMEOUT_S = 20.0
 
 
 class VncScreen:
@@ -29,12 +30,29 @@ class VncScreen:
 
     def __init__(self) -> None:
         self._client: RFBClient | None = None
+        self._url: str | None = None
+        self.__password: str | None = None
 
     async def connect(self, url: str, password: str) -> None:
         register_secret(password)
         client = RFBClient(url, password)
         await client.connect()
         self._client = client
+        self._url = url
+        self.__password = password
+
+    async def reconnect(self) -> None:
+        """Open a new connection with the same credentials and wait for its first frame."""
+        if self._url is None or self.__password is None:
+            raise RFBError("la pantalla VNC nunca se conectó")
+        await self.close()
+        client = RFBClient(self._url, self.__password)
+        await client.connect()
+        self._client = client
+        deadline = asyncio.get_running_loop().time() + RECONNECT_FRAME_TIMEOUT_S
+        while client.last_change <= 0 and asyncio.get_running_loop().time() < deadline:
+            await asyncio.sleep(0.2)
+        log.info("conexión VNC restablecida")
 
     def _require(self) -> RFBClient:
         if self._client is None:

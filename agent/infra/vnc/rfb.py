@@ -34,7 +34,7 @@ Sender = Callable[[bytes], Awaitable[None]]
 
 # ---------- errors ----------
 
-class RFBError(Exception):
+class RFBError(ConnectionError):
     """Base class for RFB client errors."""
 
 
