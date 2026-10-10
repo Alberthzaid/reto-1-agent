@@ -29,6 +29,8 @@ def mount_ui(app: FastAPI, context: PanelContext, *, enabled: bool, team_token: 
         app,
         build_panel(context),
         path=UI_PATH,
+        # Behind a proxy (X-Forwarded-Host) Gradio builds event file URLs from root_path alone.
+        root_path=UI_PATH,
         auth=[(UI_USER, team_token)],
         auth_message="Inicie sesión con el usuario admin y el TEAM_TOKEN.",
         allowed_paths=[str(traces_dir)],
