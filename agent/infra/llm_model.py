@@ -29,6 +29,18 @@ EPHEMERAL: dict[str, str] = {"type": "ephemeral"}
 MIN_CALL_WINDOW_S = 2.0  # do not start a call (or sleep) when less than this would remain
 
 
+def supports_server_fallbacks(base_url: str | None) -> bool:
+    """Anthropic's `fallbacks: "default"` only exists on the first-party API."""
+    return base_url is None or "api.anthropic.com" in base_url
+
+
+def build_client(api_key: str, base_url: str | None) -> anthropic.AsyncAnthropic:
+    """Shared client; Anthropic-compatible gateways such as OpenRouter take the key as a bearer token."""
+    if base_url is None:
+        return anthropic.AsyncAnthropic(api_key=api_key)
+    return anthropic.AsyncAnthropic(api_key=api_key, auth_token=api_key, base_url=base_url)
+
+
 class ClaudeModel:
     """Calls Claude with our own tools; append-only history, server-side context editing."""
 

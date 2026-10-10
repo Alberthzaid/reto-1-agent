@@ -4,14 +4,13 @@ import logging
 import uuid
 from pathlib import Path
 
-from anthropic import AsyncAnthropic
 from dotenv import load_dotenv
 
 from agent.api.app import create_app
 from agent.application.manager import TaskManager, WorkerFactory
 from agent.application.worker import AgentWorker, DummyWorker, Worker
 from agent.config import Settings
-from agent.infra.llm_model import ClaudeModel
+from agent.infra.llm_model import ClaudeModel, build_client, supports_server_fallbacks
 from agent.infra.sqlite_memory import SqliteMemory
 from agent.infra.tesseract_ocr import TesseractReader
 from agent.infra.vnc.keys import BLOCKED_COMBOS
@@ -27,9 +26,10 @@ def build_worker_factory(settings: Settings) -> WorkerFactory:
     if not settings.anthropic_api_key:
         log.warning("ANTHROPIC_API_KEY no está configurada: se usa DummyWorker y no se opera el escritorio")
         return lambda _instruction, _url, _password: DummyWorker()
-    client = AsyncAnthropic(api_key=settings.anthropic_api_key)
-    model_fast = ClaudeModel(client, settings.model_fast, effort="medium")
-    model_strong = ClaudeModel(client, settings.model_strong, effort="high")
+    client = build_client(settings.anthropic_api_key, settings.anthropic_base_url)
+    fallbacks = supports_server_fallbacks(settings.anthropic_base_url)
+    model_fast = ClaudeModel(client, settings.model_fast, effort="medium", use_fallbacks=fallbacks)
+    model_strong = ClaudeModel(client, settings.model_strong, effort="high", use_fallbacks=fallbacks)
     reader = TesseractReader(settings.tesseract_cmd)
     data_dir = Path(settings.data_dir)
 

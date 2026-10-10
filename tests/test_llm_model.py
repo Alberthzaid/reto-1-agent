@@ -6,7 +6,7 @@ import pytest
 from anthropic.types.beta import BetaMessage
 
 from agent.domain.budget import task_deadline
-from agent.infra.llm_model import ClaudeModel
+from agent.infra.llm_model import ClaudeModel, build_client, supports_server_fallbacks
 
 REQUEST = httpx2.Request("POST", "https://api.test/v1/messages")
 TOOLS = [
@@ -237,3 +237,23 @@ async def test_response_without_tool_use_maps_to_empty_calls() -> None:
     assert decision.tool_calls == ()
     assert decision.stop_reason == "end_turn"
     assert decision.text == "listo"
+
+
+def test_build_client_targets_anthropic_by_default() -> None:
+    client = build_client("redaction-fixture-value", None)
+    assert "api.anthropic.com" in str(client.base_url)
+    assert client.api_key == "redaction-fixture-value"
+
+
+def test_build_client_uses_bearer_auth_for_openrouter() -> None:
+    client = build_client("redaction-fixture-value", "https://openrouter.ai/api")
+    assert str(client.base_url).startswith("https://openrouter.ai/api")
+    assert client.auth_token == "redaction-fixture-value"
+
+
+@pytest.mark.parametrize(
+    "base_url,expected",
+    [(None, True), ("https://api.anthropic.com", True), ("https://openrouter.ai/api", False)],
+)
+def test_server_fallbacks_only_on_anthropic(base_url: str | None, expected: bool) -> None:
+    assert supports_server_fallbacks(base_url) is expected

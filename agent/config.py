@@ -34,9 +34,17 @@ def _optional(env: Mapping[str, str], name: str) -> str | None:
     return value if value else None
 
 
+_OPENROUTER_MODELS = {"fast": "anthropic/claude-sonnet-5.5", "strong": "anthropic/claude-opus-5.5"}
+
+
+def _is_openrouter(base_url: str | None) -> bool:
+    return base_url is not None and "openrouter.ai" in base_url
+
+
 @dataclass(frozen=True)
 class Settings:
     anthropic_api_key: str | None = None
+    anthropic_base_url: str | None = None
     team_token: str | None = None
     model_fast: str = "claude-sonnet-5-5"
     model_strong: str = "claude-opus-5-5"
@@ -53,11 +61,16 @@ class Settings:
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "Settings":
         source: Mapping[str, str] = os.environ if env is None else env
+        base_url = _optional(source, "ANTHROPIC_BASE_URL")
+        openrouter = _is_openrouter(base_url)
+        default_fast = _OPENROUTER_MODELS["fast"] if openrouter else cls.model_fast
+        default_strong = _OPENROUTER_MODELS["strong"] if openrouter else cls.model_strong
         return cls(
             anthropic_api_key=_optional(source, "ANTHROPIC_API_KEY"),
+            anthropic_base_url=base_url,
             team_token=_optional(source, "TEAM_TOKEN"),
-            model_fast=source.get("MODEL_FAST") or cls.model_fast,
-            model_strong=source.get("MODEL_STRONG") or cls.model_strong,
+            model_fast=source.get("MODEL_FAST") or default_fast,
+            model_strong=source.get("MODEL_STRONG") or default_strong,
             time_limit_sec=_parse_int(source, "TIME_LIMIT_SEC", cls.time_limit_sec),
             data_dir=source.get("DATA_DIR") or cls.data_dir,
             tesseract_cmd=_optional(source, "TESSERACT_CMD"),

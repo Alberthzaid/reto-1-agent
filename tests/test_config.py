@@ -78,3 +78,22 @@ def test_require_desktop_names_variable_only(env: dict[str, str], missing: str) 
         s.require_desktop()
     assert missing in str(exc.value)
     assert "pw" not in str(exc.value).lower().replace("desktop_password", "")
+
+
+def test_base_url_defaults_to_none() -> None:
+    assert Settings.from_env({}).anthropic_base_url is None
+
+
+def test_openrouter_base_url_maps_default_models_to_openrouter_ids() -> None:
+    s = Settings.from_env({"ANTHROPIC_BASE_URL": "https://openrouter.ai/api"})
+    assert s.anthropic_base_url == "https://openrouter.ai/api"
+    assert s.model_fast == "anthropic/claude-sonnet-5.5"
+    assert s.model_strong == "anthropic/claude-opus-5.5"
+
+
+def test_explicit_models_win_over_openrouter_defaults() -> None:
+    s = Settings.from_env(
+        {"ANTHROPIC_BASE_URL": "https://openrouter.ai/api", "MODEL_FAST": "anthropic/claude-haiku-5.5"}
+    )
+    assert s.model_fast == "anthropic/claude-haiku-5.5"
+    assert s.model_strong == "anthropic/claude-opus-5.5"
