@@ -8,4 +8,6 @@ Some applications keep the form open after saving. A form whose title now shows 
 
 An error message after the commit, values that differ from the task, or values that are missing from every image mean not confirmed.
 
-If the evidence is missing, partial, ambiguous, or contradicts the claim, do not confirm. Answer only with the `verdict` tool; write `evidence` in Spanish, citing what you saw.
+Judge the result, not the process. Whether the agent searched for duplicates beforehand, or remarks in its claim about steps it could not double-check, cannot be seen on screen and are not a reason to reject; the claim is only context. The question is whether the requested change (or answer) is visible.
+
+If the evidence is missing, partial, ambiguous, or contradicts the task, do not confirm. Answer only with the `verdict` tool; write `evidence` in Spanish, citing what you saw.
