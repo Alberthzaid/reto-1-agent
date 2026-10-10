@@ -6,7 +6,7 @@ import io
 import logging
 import re
 import unicodedata
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, Collection, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -15,8 +15,9 @@ import numpy as np
 from PIL import Image
 
 from agent.domain.diff import changed_regions
-from agent.domain.guard import COMMIT_WORDS, Guard, assigned_codes, label_at, words
-from agent.domain.models import TextBox, ToolCall
+from agent.domain.guard import COMMIT_WORDS, Guard, assigned_codes, label_at, normalize_combo, words
+from agent.domain.models import ScriptStep, TextBox, ToolCall
+from agent.domain.procedures import normalize
 from agent.ports.interfaces import Reader, Screen
 
 log = logging.getLogger(__name__)
@@ -34,6 +35,14 @@ DIFF_BLOCK = 8
 DIFF_THRESHOLD = 24
 MAX_REGIONS_REPORTED = 8
 MAX_RECORDED_STEPS = 15
+# Replayable script recorded next to the step texts (procedure memory). Typed text must be one of the
+# plan values, recorded by field name; anything else voids the script.
+MAX_SCRIPT_STEPS = 40
+LABEL_LEFT_MAX_PX = 240  # a field label left of its input, on the same row
+LABEL_ABOVE_MAX_PX = 40  # a field label above its input
+LABEL_ALIGN_PX = 24  # an above label may start this far left of the input
+LABEL_EDGE_TOL_PX = 4
+SCRIPT_SKIPPED_COMBOS: frozenset[str] = frozenset({"ctrl+a"})  # selection only; type_into already does it
 # Full-screen OCR merges adjacent buttons into one line and misses light-on-dark text, so the guard reads
 # only the clicked button: its rectangle is found by color around the click point. A fixed crop read the
 # neighbor button too ("Cerrar | Aplicar"), so it is only a fallback, and a narrow one.
@@ -532,6 +541,32 @@ def screen_regions(prev: Image.Image, curr: Image.Image) -> list[tuple[int, int,
     return regions
 
 
+def field_label_box(
+    boxes: Sequence[TextBox], region: tuple[int, int, int, int], ignore: Collection[str] = ()
+) -> TextBox | None:
+    """Nearest text left of the input on its row, or above it and aligned with it: the field's label.
+
+    `ignore` holds normalized texts that are field contents, not labels (values already typed)."""
+    rx, ry, rw, rh = region
+    best: tuple[int, TextBox] | None = None
+    for box in boxes:
+        if not box.text.strip() or normalize(box.text) in ignore or _contains(region, *box.center):
+            continue
+        right, bottom = box.x + box.w, box.y + box.h
+        distance: int | None = None
+        if right <= rx + LABEL_EDGE_TOL_PX and box.y < ry + rh and bottom > ry:
+            distance = rx - right
+            if distance > LABEL_LEFT_MAX_PX:
+                distance = None
+        elif bottom <= ry + LABEL_EDGE_TOL_PX and rx - LABEL_ALIGN_PX <= box.x < rx + rw:
+            distance = ry - bottom
+            if distance > LABEL_ABOVE_MAX_PX:
+                distance = None
+        if distance is not None and (best is None or distance < best[0]):
+            best = (distance, box)
+    return best[1] if best else None
+
+
 def _int(args: dict[str, Any], name: str, low: int, high: int) -> int:
     value = args.get(name)
     if isinstance(value, bool) or not isinstance(value, int):
@@ -581,6 +616,7 @@ class ToolBox:
         trace: TraceSink | None = None,
         deadline: float | None = None,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
+        plan_values: Sequence[tuple[str, str]] = (),
     ) -> None:
         self._screen = screen
         self._reader = reader
@@ -597,6 +633,11 @@ class ToolBox:
         self._outcome_targets: list[tuple[int, int, int, int]] = []
         self.steps: list[str] = []
         self._step = 0
+        self._plan_values: tuple[tuple[str, str], ...] = ()
+        self.set_plan_values(plan_values)
+        self._script: list[ScriptStep] = []
+        self._script_ok = True
+        self.last_reread: tuple[bool, ...] = ()  # one flag per field typed by the last type_into/fill_form
         self._handlers: dict[str, Callable[[dict[str, Any]], Awaitable[ToolOutcome]]] = {
             "click": self._click,
             "type_into": self._type_into,
@@ -619,6 +660,23 @@ class ToolBox:
     @property
     def commit_evidence(self) -> list[CommitEvidence]:
         return list(self._commit_evidence)
+
+    @property
+    def script(self) -> tuple[ScriptStep, ...]:
+        """Replayable script of what was done; empty when something could not be recorded safely."""
+        return tuple(self._script) if self._script_ok else ()
+
+    def set_plan_values(self, values: Sequence[tuple[str, str]]) -> None:
+        """Plan (field, value) pairs: typed text is recorded in the script by its field name."""
+        self._plan_values = tuple((str(name), str(value)) for name, value in values)
+
+    def keep_script_step(self, step: ScriptStep) -> None:
+        """Keep a step that was not executed (a dismissal whose dialog was absent) in the script."""
+        self._add_script(step)
+
+    async def target_label(self, x: int, y: int) -> str:
+        """Label the guard would read for a click at the point, without clicking."""
+        return label_at(x, y, await self._target_boxes(x, y))
 
     def prime(self, image: Image.Image, boxes: list[TextBox]) -> None:
         self._image = image
@@ -811,6 +869,37 @@ class ToolBox:
         if len(self.steps) < MAX_RECORDED_STEPS:
             self.steps.append(step)
 
+    def _add_script(self, step: ScriptStep) -> None:
+        if len(self._script) >= MAX_SCRIPT_STEPS:
+            self._void_script("too many steps")
+            return
+        self._script.append(step)
+
+    def _void_script(self, why: str) -> None:
+        if self._script_ok:
+            log.info("no se guardará un guion reproducible: %s", why)
+        self._script_ok = False
+
+    def _field_name(self, text: str) -> str | None:
+        wanted = normalize(text)
+        return next((name for name, value in self._plan_values if value and normalize(value) == wanted), None)
+
+    def _record_fills(
+        self, fields: Sequence[tuple[int, int, str]], regions: Sequence[tuple[int, int, int, int]]
+    ) -> None:
+        """Fill steps for typed fields, located by their label; voids the script if one cannot be."""
+        typed = {normalize(value) for _, value in self._plan_values if value}
+        for (x, y, text), region in zip(fields, regions):
+            name = self._field_name(text)
+            label = field_label_box(self._boxes, region, typed)
+            if name is None or label is None:
+                self._void_script("typed text outside the plan" if name is None else "field without a label")
+                return
+            lx, ly = label.center
+            self._add_script(
+                ScriptStep(kind="fill", field_label=label.text.strip(), field=name, x=x, y=y, dx=x - lx, dy=y - ly)
+            )
+
     def _blocked(self, reason: str) -> ToolOutcome:
         return ToolOutcome(text=f"{reason}\n{self._status_line()}", is_error=True)
 
@@ -833,6 +922,11 @@ class ToolBox:
         await self._screen.click(x, y, button, double)
         if verdict.label:
             self._record_step(f"click '{verdict.label}'")
+        if not verdict.label.strip() or button != "left" or double:
+            self._void_script("click without a readable label")
+        else:
+            self._add_script(ScriptStep(kind="click", anchor=verdict.label.strip(), x=x, y=y,
+                                        commit=verdict.is_commit, dismissal=verdict.dismissal))
         target = f" sobre '{verdict.label}'" if verdict.label else ""
         note = f"Clic en ({x},{y}){target}."
         if verdict.is_commit:
@@ -917,10 +1011,15 @@ class ToolBox:
         since = self._clock()
         await self._fill(x, y, text, replace)
         self._record_step("type into a field")
+        if replace:
+            self._record_fills([(x, y, text)], [region])
+        else:
+            self._void_script("text appended to a field")
         self._guard.note_data_entry()
         image, changed = await self._settler.settle(since)
         image = await self._await_fields(image, [region], before)
         read_back = await self._read_field(image, region)
+        self.last_reread = (same_text(read_back, text),)
         note = f"Escribí en ({x},{y}). Campo releído: {self._reread_note(read_back, text)}."
         if not same_text(read_back, text):
             note += "\n" + REREAD_HINT
@@ -950,15 +1049,19 @@ class ToolBox:
         for x, y, value in parsed:
             await self._fill(x, y, value, True)
         self._record_step(f"fill form ({len(parsed)} fields)")
+        self._record_fills(parsed, regions)
         self._guard.note_data_entry()
         image, changed = await self._settler.settle(since)
         image = await self._await_fields(image, regions, before)
         lines = ["Formulario llenado. Campos releídos:"]
         mismatch = False
+        reread: list[bool] = []
         for (x, y, value), region in zip(parsed, regions):
             read_back = await self._read_field(image, region)
-            mismatch |= not same_text(read_back, value)
+            reread.append(same_text(read_back, value))
+            mismatch |= not reread[-1]
             lines.append(f"- ({x},{y}): {self._reread_note(read_back, value)}")
+        self.last_reread = tuple(reread)
         if mismatch:
             lines.append(REREAD_HINT)
         return await self._observation(image, "\n".join(lines), changed)
@@ -973,6 +1076,11 @@ class ToolBox:
         since = self._clock()
         await self._screen.key(combo)
         self._record_step(f"key {combo}")
+        normalized = normalize_combo(combo)
+        if len(normalized) == 1:
+            self._void_script("a key that types text")
+        elif normalized not in SCRIPT_SKIPPED_COMBOS:
+            self._add_script(ScriptStep(kind="key", anchor=combo))
         self._guard.note_data_entry()
         outcome, _ = await self._observe_after(since, f"Tecla '{combo}' enviada.")
         return outcome

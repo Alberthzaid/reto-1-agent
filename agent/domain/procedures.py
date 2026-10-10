@@ -4,7 +4,7 @@ import re
 import unicodedata
 from collections.abc import Iterable, Sequence
 
-from agent.domain.models import Plan, Procedure
+from agent.domain.models import Plan, Procedure, ScriptStep
 
 MIN_TOKEN_CHARS = 3
 EMAIL_RE = re.compile(r"[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
@@ -54,6 +54,19 @@ def sanitize_steps(steps: Iterable[str], plan: Plan, secrets: Iterable[str]) -> 
     tokens = _data_tokens(plan)
     normalized_secrets = _normalized_secrets(secrets)
     return tuple(step for step in steps if not _has_data(step, tokens, normalized_secrets))
+
+
+def sanitize_script(script: Iterable[ScriptStep], plan: Plan, secrets: Iterable[str]) -> tuple[ScriptStep, ...]:
+    """The script unchanged, or empty when any label or field name mentions task data (all or nothing:
+    a script with a step removed would not reproduce the route)."""
+    steps = tuple(script)
+    tokens = _data_tokens(plan)
+    normalized_secrets = _normalized_secrets(secrets)
+    for step in steps:
+        for text in (step.anchor, step.field_label, step.field):
+            if text and _has_data(f"'{text}'", tokens, normalized_secrets):
+                return ()
+    return steps
 
 
 def sanitize_text(text: str, plan: Plan, secrets: Iterable[str]) -> str:

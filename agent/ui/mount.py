@@ -12,12 +12,12 @@ UI_PATH = "/ui"
 UI_USER = "admin"
 
 
-def mount_ui(app: FastAPI, context: PanelContext, *, enabled: bool, team_token: str | None) -> bool:
-    """Mount the panel at /ui behind a login (user `admin`, password TEAM_TOKEN). True when mounted."""
+def mount_ui(app: FastAPI, context: PanelContext, *, enabled: bool, password: str | None) -> bool:
+    """Mount the panel at /ui behind a login (user `admin`, `password`). True when mounted."""
     if not enabled:
         return False
-    if not team_token:
-        log.warning("UI_ENABLED está activo pero falta TEAM_TOKEN: el panel no se monta")
+    if not password:
+        log.warning("UI_ENABLED está activo pero faltan UI_PASSWORD y TEAM_TOKEN: el panel no se monta")
         return False
     import gradio as gr
 
@@ -30,8 +30,8 @@ def mount_ui(app: FastAPI, context: PanelContext, *, enabled: bool, team_token: 
         app,
         build_panel(context),
         path=UI_PATH,
-        auth=[(UI_USER, team_token)],
-        auth_message="Inicie sesión con el usuario admin y el TEAM_TOKEN.",
+        auth=[(UI_USER, password)],
+        auth_message="Inicie sesión con el usuario admin.",
         allowed_paths=[str(traces_dir)],
         show_error=False,
         ssr_mode=False,

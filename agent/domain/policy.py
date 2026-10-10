@@ -290,7 +290,9 @@ class Policy:
         image: Image.Image,
         boxes: Sequence[TextBox],
         hints: Sequence[Procedure] = (),
+        note: str = "",
     ) -> TaskResult:
+        """`note` is extra context for the first turn (e.g. where a replay from memory stopped)."""
         system = load_prompt("system", self._prompts_dir)
         intro = (
             f"Task: {instruction}\n{describe_orientation(orientation)}\n\nPlan:\n{describe_plan(plan)}"
@@ -299,6 +301,8 @@ class Policy:
         hint_text = describe_hints(hints)
         if hint_text:
             intro = f"{intro}\n\n{hint_text}"
+        if note:
+            intro = f"{intro}\n\n{note}"
         messages: list[Any] = [{"role": "user", "content": await screen_content(intro, image, boxes)}]
         nudged = False
         for turn in range(1, self._max_turns + 1):

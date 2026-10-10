@@ -17,6 +17,7 @@ from agent.domain.models import (
     Observation,
     Plan,
     Procedure,
+    ScriptStep,
     Task,
     TaskResult,
     TaskStatus,
@@ -27,7 +28,8 @@ from agent.ports.interfaces import Classifier, Memory, Model, Reader, Screen
 
 ROOT = Path(__file__).resolve().parent.parent
 ALL_MODELS = [
-    Task, Observation, Action, Commit, Procedure, Decision, Classification, TextBox, ToolCall, Plan, TaskResult,
+    Task, Observation, Action, Commit, Procedure, ScriptStep, Decision, Classification, TextBox, ToolCall, Plan,
+    TaskResult,
 ]
 
 
@@ -102,7 +104,7 @@ def test_plan_defaults_and_fields() -> None:
 
 def test_procedure_holds_navigation_text_learning_and_successes() -> None:
     assert [f.name for f in dataclasses.fields(Procedure)] == [
-        "app", "intent", "steps", "aprendizaje", "exitos", "app_version",
+        "app", "intent", "steps", "aprendizaje", "exitos", "app_version", "script", "fallos_replay",
     ]
     proc = Procedure(app="a", intent="crear:cliente")
     assert proc.steps == () and proc.aprendizaje == "" and proc.exitos == 0 and proc.app_version is None
@@ -192,7 +194,7 @@ async def test_classifier_may_return_none() -> None:
         (Reader, {"read"}),
         (Model, {"decide"}),
         (Memory, {"fingerprint", "procedures", "save_procedure", "penalize", "save_task", "load_task",
-                  "list_tasks", "mark_stale_running_as_failed"}),
+                  "list_tasks", "mark_stale_running_as_failed", "record_replay"}),
         (Classifier, {"classify"}),
         (Screen, {"connect", "screenshot", "click", "type_text", "key", "scroll", "last_change_ts", "close"}),
     ],

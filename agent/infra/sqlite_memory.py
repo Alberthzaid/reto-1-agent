@@ -8,10 +8,11 @@ import re
 import sqlite3
 import unicodedata
 from collections.abc import Sequence
+from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 
-from agent.domain.models import Procedure, Task, TaskStatus, TextBox
+from agent.domain.models import Procedure, ScriptStep, Task, TaskStatus, TextBox
 
 log = logging.getLogger(__name__)
 
@@ -65,6 +66,11 @@ class SqliteMemory:
             if "app_version" not in columns:
                 # Older databases: add the column in place; existing rows keep NULL (version unknown).
                 connection.execute("ALTER TABLE procedures ADD COLUMN app_version TEXT")
+            if "script" not in columns:
+                # Replayable scripts came later: older rows have none and are used as text hints only.
+                connection.execute("ALTER TABLE procedures ADD COLUMN script TEXT NOT NULL DEFAULT '[]'")
+            if "fallos_replay" not in columns:
+                connection.execute("ALTER TABLE procedures ADD COLUMN fallos_replay INTEGER NOT NULL DEFAULT 0")
 
     def _connect(self) -> sqlite3.Connection:
         return sqlite3.connect(self._path)
@@ -147,20 +153,14 @@ class SqliteMemory:
         with self._connect() as connection:
             rows = connection.execute(
                 """
-                SELECT app, intent, steps, aprendizaje, exitos, app_version FROM procedures
+                SELECT app, intent, steps, aprendizaje, exitos, app_version, script, fallos_replay FROM procedures
                 WHERE app = ? AND intent = ? AND exitos > 0
                 ORDER BY exitos DESC, updated_at DESC
                 LIMIT ?
                 """,
                 (app, intent, TOP_PROCEDURES),
             ).fetchall()
-        return [
-            Procedure(
-                app=row[0], intent=row[1], steps=tuple(json.loads(row[2])), aprendizaje=row[3], exitos=row[4],
-                app_version=row[5],
-            )
-            for row in rows
-        ]
+        return [_procedure_from_row(row) for row in rows]
 
     async def save_procedure(self, app: str, procedure: Procedure) -> None:
         await asyncio.to_thread(self._save_procedure, app, procedure)
@@ -170,19 +170,41 @@ class SqliteMemory:
             log.warning("procedimiento descartado: contiene datos que no deben guardarse")
             return
         steps = json.dumps(list(procedure.steps), ensure_ascii=False)
+        script = procedure.script
+        if any(_DATA_RE.search(text) for step in script for text in (step.anchor, step.field_label, step.field)):
+            log.warning("guion descartado: contiene datos que no deben guardarse")
+            script = ()
+        script_json = _script_json(script)
         with self._connect() as connection:
+            # A new recording replaces the script; the replay failure count survives only while the script
+            # stays the same (a successful replay resets it through record_replay).
             connection.execute(
                 """
-                INSERT INTO procedures (app, intent, steps, aprendizaje, exitos, updated_at, app_version)
-                VALUES (?, ?, ?, ?, 1, ?, ?)
+                INSERT INTO procedures (app, intent, steps, aprendizaje, exitos, updated_at, app_version, script,
+                                        fallos_replay)
+                VALUES (?, ?, ?, ?, 1, ?, ?, ?, 0)
                 ON CONFLICT(app, intent, steps) DO UPDATE SET
                     exitos = CASE WHEN procedures.app_version IS excluded.app_version
                         THEN MAX(procedures.exitos, 0) + 1 ELSE 1 END,
                     aprendizaje = excluded.aprendizaje,
                     updated_at = excluded.updated_at,
-                    app_version = excluded.app_version
+                    app_version = excluded.app_version,
+                    fallos_replay = CASE WHEN procedures.script = excluded.script
+                        THEN procedures.fallos_replay ELSE 0 END,
+                    script = excluded.script
                 """,
-                (app, procedure.intent, steps, procedure.aprendizaje, _now(), procedure.app_version),
+                (app, procedure.intent, steps, procedure.aprendizaje, _now(), procedure.app_version, script_json),
+            )
+
+    async def record_replay(self, app: str, intent: str, procedure: Procedure, success: bool) -> None:
+        await asyncio.to_thread(self._record_replay, app, intent, procedure, success)
+
+    def _record_replay(self, app: str, intent: str, procedure: Procedure, success: bool) -> None:
+        update = "fallos_replay = 0" if success else "fallos_replay = fallos_replay + 1"
+        with self._connect() as connection:
+            connection.execute(
+                f"UPDATE procedures SET {update} WHERE app = ? AND intent = ? AND steps = ?",
+                (app, intent, json.dumps(list(procedure.steps), ensure_ascii=False)),
             )
 
     async def penalize(self, app: str, intent: str, procedures: Sequence[Procedure]) -> None:
@@ -210,14 +232,11 @@ class SqliteMemory:
     def _list_procedures(self, limit: int) -> list[Procedure]:
         with self._connect() as connection:
             rows = connection.execute(
-                "SELECT app, intent, steps, aprendizaje, exitos FROM procedures "
+                "SELECT app, intent, steps, aprendizaje, exitos, app_version, script, fallos_replay FROM procedures "
                 "ORDER BY exitos DESC, updated_at DESC LIMIT ?",
                 (limit,),
             ).fetchall()
-        return [
-            Procedure(app=row[0], intent=row[1], steps=tuple(json.loads(row[2])), aprendizaje=row[3], exitos=row[4])
-            for row in rows
-        ]
+        return [_procedure_from_row(row) for row in rows]
 
     async def delete_procedure(self, app: str, intent: str, steps: Sequence[str]) -> bool:
         return await asyncio.to_thread(self._delete_procedure, app, intent, steps)
@@ -229,6 +248,32 @@ class SqliteMemory:
                 (app, intent, json.dumps(list(steps), ensure_ascii=False)),
             )
             return cursor.rowcount > 0
+
+
+def _script_json(script: Sequence[ScriptStep]) -> str:
+    return json.dumps([asdict(step) for step in script], ensure_ascii=False, sort_keys=True)
+
+
+def _script_from_json(text: str | None) -> tuple[ScriptStep, ...]:
+    """Stored script; an unreadable one is treated as absent (the procedure stays a text hint)."""
+    try:
+        return tuple(ScriptStep(**item) for item in json.loads(text or "[]"))
+    except (TypeError, ValueError):
+        log.warning("guion guardado ilegible: se ignora")
+        return ()
+
+
+def _procedure_from_row(row: Sequence[object]) -> Procedure:
+    return Procedure(
+        app=str(row[0]),
+        intent=str(row[1]),
+        steps=tuple(json.loads(str(row[2]))),
+        aprendizaje=str(row[3]),
+        exitos=int(row[4]),  # type: ignore[call-overload]
+        app_version=row[5] if row[5] is None else str(row[5]),
+        script=_script_from_json(row[6] if row[6] is None else str(row[6])),
+        fallos_replay=int(row[7] or 0),  # type: ignore[call-overload]
+    )
 
 
 def _task_from_row(row: Sequence[str]) -> Task:

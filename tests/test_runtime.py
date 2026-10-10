@@ -39,6 +39,7 @@ def test_initial_values_come_from_settings() -> None:
     assert values.falco_enabled is False
     assert values.blocked_combos == ("F5", "ctrl+w")
     assert values.prompts_dir == Path("prompts")
+    assert values.replay_min_successes == 1
 
 
 def test_apply_overrides_and_restore_resets() -> None:
@@ -56,7 +57,7 @@ def test_apply_overrides_and_restore_resets() -> None:
 
 @pytest.mark.parametrize(
     "changes",
-    [{"max_turns": 0}, {"time_limit_sec": -1}, {"model_fast": " "}, {"unknown": 1}],
+    [{"max_turns": 0}, {"time_limit_sec": -1}, {"model_fast": " "}, {"unknown": 1}, {"replay_min_successes": 0}],
 )
 def test_apply_rejects_invalid_values_without_changing_state(changes: dict[str, Any]) -> None:
     config = runtime()
@@ -89,14 +90,16 @@ def test_worker_factory_reads_runtime_per_task(tmp_path: Path) -> None:
     first = factory("task-1", "instr", "wss://d/websockify", "pw")
     assert isinstance(first, RecordingWorker)
     assert first.kwargs["max_turns"] == 40
+    assert first.kwargs["replay_min_successes"] == 1
     assert first.kwargs["classifier"] is None
     assert first.args[3].time_limit_sec == 200
 
     config.apply(model_fast="fast-2", max_turns=7, time_limit_sec=60, falco_enabled=True,
-                 blocked_combos=["ctrl+q"], prompts_dir=tmp_path / "otros")
+                 blocked_combos=["ctrl+q"], prompts_dir=tmp_path / "otros", replay_min_successes=3)
     second = factory("task-2", "instr", "wss://d/websockify", "pw")
     assert isinstance(second, RecordingWorker)
     assert second.kwargs["max_turns"] == 7
+    assert second.kwargs["replay_min_successes"] == 3
     assert second.kwargs["prompts_dir"] == tmp_path / "otros"
     assert second.kwargs["blocked_combos"] == ("ctrl+q",)
     assert second.kwargs["classifier"] is classifier

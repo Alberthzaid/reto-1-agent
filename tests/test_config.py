@@ -105,6 +105,17 @@ def test_explicit_models_win_over_openrouter_defaults() -> None:
     assert s.model_strong == "anthropic/claude-opus-5.5"
 
 
+def test_ui_password_falls_back_to_team_token_and_stays_out_of_repr() -> None:
+    own = Settings.from_env({"TEAM_TOKEN": "t-456", "UI_PASSWORD": "panel-pass"})
+    assert own.ui_password == "panel-pass"
+    assert own.panel_password == "panel-pass"
+    assert "panel-pass" not in repr(own)
+    fallback = Settings.from_env({"TEAM_TOKEN": "t-456"})
+    assert fallback.ui_password is None
+    assert fallback.panel_password == "t-456"
+    assert Settings.from_env({}).panel_password is None
+
+
 @pytest.mark.parametrize(("raw", "expected"), [(None, False), ("1", True), ("0", False), ("true", True)])
 def test_ui_enabled_flag(raw: str | None, expected: bool) -> None:
     env = {} if raw is None else {"UI_ENABLED": raw}

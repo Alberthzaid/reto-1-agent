@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from agent.application.runtime import RuntimeValues
-from agent.domain.models import Procedure, Task, TaskStatus
+from agent.domain.models import Procedure, ScriptStep, Task, TaskStatus
 from agent.observability import log_setup
 from agent.observability.traces import TraceStep
 from agent.ui import views
@@ -113,7 +113,14 @@ def test_level_filter() -> None:
 
 def test_procedure_rows_redacted() -> None:
     procs = [Procedure(app="app1", intent="crear:cliente", steps=("abrir Clientes", REDACTION_FIXTURE), exitos=3)]
-    assert views.procedure_rows(procs) == [["app1", "crear:cliente", 3, "abrir Clientes > ***"]]
+    assert views.procedure_rows(procs) == [["app1", "crear:cliente", 3, "abrir Clientes > ***", "guion: 0 pasos"]]
+
+
+def test_procedure_rows_show_the_script_length() -> None:
+    script = (ScriptStep(kind="click", anchor="Clientes"), ScriptStep(kind="fill", field_label="NIT *", field="nit"))
+    procs = [Procedure(app="app1", intent="crear:cliente", steps=("click 'Clientes'",), script=script, exitos=1)]
+    assert views.procedure_rows(procs)[0][-1] == "guion: 2 pasos"
+    assert views.PROCEDURE_HEADERS[-1] == "guion"
 
 
 def test_parse_combos_and_ids() -> None:

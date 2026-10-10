@@ -22,6 +22,7 @@ class RuntimeValues:
     falco_enabled: bool
     blocked_combos: tuple[str, ...]
     prompts_dir: Path
+    replay_min_successes: int = 1  # verified successes a learned script needs before it is replayed
 
 
 _FIELDS = frozenset(f.name for f in fields(RuntimeValues))
@@ -39,12 +40,15 @@ def _validated(values: RuntimeValues) -> RuntimeValues:
         raise ValueError("time_limit_sec debe ser mayor que cero")
     if values.max_turns <= 0:
         raise ValueError("max_turns debe ser mayor que cero")
+    if values.replay_min_successes <= 0:
+        raise ValueError("replay_min_successes debe ser mayor que cero")
     return replace(
         values,
         model_fast=values.model_fast.strip(),
         model_strong=values.model_strong.strip(),
         time_limit_sec=int(values.time_limit_sec),
         max_turns=int(values.max_turns),
+        replay_min_successes=int(values.replay_min_successes),
         falco_enabled=bool(values.falco_enabled),
         blocked_combos=_clean_combos(values.blocked_combos),
         prompts_dir=Path(values.prompts_dir),

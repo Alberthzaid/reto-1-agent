@@ -13,9 +13,10 @@ from agent.config import Settings
 from agent.domain.app_profile import select_current
 from agent.domain.budget import task_deadline
 from agent.domain.guard import Guard
-from agent.domain.models import Plan, Procedure, TaskResult, TaskStatus, TextBox
-from agent.domain.policy import DEFAULT_MAX_TURNS, PROMPTS_DIR, Policy
-from agent.domain.procedures import intent_key, sanitize_steps, sanitize_text
+from agent.domain.models import Plan, Procedure, ScriptStep, TaskResult, TaskStatus, TextBox
+from agent.domain.policy import DEFAULT_MAX_TURNS, PROMPTS_DIR, Orientation, Policy
+from agent.domain.procedures import intent_key, normalize, sanitize_script, sanitize_steps, sanitize_text
+from agent.domain.replay import ScriptRunner, replayable
 from agent.domain.reporter import build_summary
 from agent.domain.settler import Settler
 from agent.domain.tools import Settles, ToolBox, TraceSink
@@ -30,11 +31,27 @@ FIRST_FRAME_POLL_S = 0.2
 HARD_MARGIN_S = 5.0  # stop before the task manager's own timeout
 VERIFY_RESERVE_S = 30.0  # time kept for the final verification call
 QUESTION_KINDS: frozenset[str] = frozenset({"consultar", "pregunta", "question"})
+REPLAY_STOPPED_NOTE = (
+    "Repetición desde memoria detenida en el paso {step}: {reason}. Continúa desde la pantalla actual; "
+    "no repitas confirmaciones ya registradas."
+)
+CHANGE_VERBS: dict[str, str] = {
+    "crear": "Se creó", "modificar": "Se modificó", "eliminar": "Se eliminó", "exportar": "Se exportó",
+}
 
 
 def is_question(plan: Plan) -> bool:
     """Read-only task that asks for a value instead of changing data."""
     return plan.kind.strip().casefold() in QUESTION_KINDS
+
+
+def describe_change(plan: Plan) -> str:
+    """Spanish summary of a change done exactly as planned, e.g. "Se creó cliente 'X' con nit: 9."."""
+    verb = CHANGE_VERBS.get(normalize(plan.kind), "Se completó la tarea sobre")
+    subject = " ".join(part for part in (plan.entity.strip(), f"'{plan.target}'" if plan.target else "") if part)
+    values = "; ".join(f"{name}: {value}" for name, value in plan.values if value)
+    text = f"{verb} {subject}".strip()
+    return f"{text} con {values}." if values else f"{text}."
 
 
 @runtime_checkable
@@ -71,6 +88,7 @@ class AgentWorker:
         memory: Memory | None = None,
         max_turns: int = DEFAULT_MAX_TURNS,
         prompts_dir: Path = PROMPTS_DIR,
+        replay_min_successes: int = 1,
     ) -> None:
         self._instruction = instruction
         self._url = url
@@ -89,6 +107,7 @@ class AgentWorker:
         self._memory = memory
         self._max_turns = max_turns
         self._prompts_dir = prompts_dir
+        self._replay_min_successes = replay_min_successes
         self._guard = Guard(blocked_combos, planned_commits=0)
         self._screen: Screen | None = None
         self._closed = False
@@ -166,9 +185,20 @@ class AgentWorker:
             # Routes learned on another interface version would point the model at buttons that moved.
             log.info("%s; se descartan %d procedimientos guardados", change, len(recalled) - len(hints))
             await toolbox.trace_event(change)
-        result = await policy.run_plan(self._instruction, plan, orientation, image, boxes, hints=hints)
+        toolbox.set_plan_values(plan.values)
+        used = (
+            replayable(hints, plan, self._replay_min_successes)
+            if plan.feasible and not is_question(plan)
+            else None
+        )
+        replayed = False
+        if used is None:
+            result = await policy.run_plan(self._instruction, plan, orientation, image, boxes, hints=hints)
+        else:
+            result, replayed = await self._replay(used, plan, policy, toolbox, orientation, hints, exec_deadline)
         if result.estado is not TaskStatus.terminada:
             await self._penalize(app, intent, hints)
+            await self._replay_failed(app, intent, used)
             return result
         if is_question(plan) and not self._guard.commits:
             # A read-only answer leaves nothing to verify on screen; a fresh screenshot of a paginated
@@ -188,17 +218,87 @@ class AgentWorker:
             evidence=toolbox.commit_evidence,
         )
         if confirmed:
-            await self._remember(app, intent, plan, toolbox.steps, result, orientation.version)
+            if used is not None and replayed:
+                await self._remember_replay(app, intent, plan, used, toolbox.script, orientation.version)
+            else:
+                await self._replay_failed(app, intent, used, penalize=True)
+                await self._remember(
+                    app, intent, plan, toolbox.steps, result, orientation.version, script=toolbox.script
+                )
             return result
         log.info("el verificador no confirmó el resultado")
         await self._penalize(app, intent, hints)
+        await self._replay_failed(app, intent, used)
         return replace(
             result,
             estado=TaskStatus.fallida,
             resumen=f"No se pudo confirmar el resultado en pantalla: {evidence}",
         )
 
+    async def _replay(
+        self,
+        used: Procedure,
+        plan: Plan,
+        policy: Policy,
+        toolbox: ToolBox,
+        orientation: Orientation,
+        hints: Sequence[Procedure],
+        deadline: float,
+    ) -> tuple[TaskResult, bool]:
+        """Memory mode: replay the learned script; if it stops, the model continues from the current screen
+        with the guard state kept (commits already made stay counted). Returns (result, replay completed)."""
+        outcome = await ScriptRunner(toolbox, self._guard, self._clock, deadline).run(used.script, plan)
+        if outcome.completed:
+            log.info("modo memoria: %d pasos reproducidos", outcome.steps_done)
+            await toolbox.trace_event(f"modo memoria: {outcome.steps_done} pasos reproducidos")
+            result = TaskResult(
+                estado=TaskStatus.terminada,
+                resumen=describe_change(plan),
+                commits=self._guard.commits,
+                aprendizaje=used.aprendizaje,
+            )
+            return result, True
+        step = outcome.steps_done + 1
+        await toolbox.trace_event(f"repetición detenida en {step}: {outcome.reason}")
+        image, boxes = await toolbox.observe()
+        note = REPLAY_STOPPED_NOTE.format(step=step, reason=outcome.reason)
+        result = await policy.execute(self._instruction, plan, orientation, image, boxes, hints, note=note)
+        return result, False
+
     # --- procedure memory: failures are logged and never change the task result -----------------
+
+    async def _remember_replay(
+        self,
+        app: str | None,
+        intent: str,
+        plan: Plan,
+        used: Procedure,
+        script: Sequence[ScriptStep],
+        app_version: str | None,
+    ) -> None:
+        """A verified replay counts as one more success of the procedure it replayed; the script just
+        recorded (current positions) replaces the stored one."""
+        if self._memory is None or app is None:
+            return
+        try:
+            fresh = sanitize_script(script, plan, self._secrets)
+            procedure = replace(used, app_version=app_version, script=fresh or used.script)
+            await self._memory.save_procedure(app, procedure)
+            await self._memory.record_replay(app, intent, procedure, success=True)
+        except Exception:
+            log.exception("no se pudo registrar la repetición desde memoria")
+
+    async def _replay_failed(
+        self, app: str | None, intent: str, used: Procedure | None, penalize: bool = False
+    ) -> None:
+        if self._memory is None or app is None or used is None:
+            return
+        try:
+            await self._memory.record_replay(app, intent, used, success=False)
+        except Exception:
+            log.exception("no se pudo registrar el fallo de la repetición desde memoria")
+        if penalize:
+            await self._penalize(app, intent, [used])
 
     def _fingerprint(self, boxes: list[TextBox]) -> str | None:
         if self._memory is None:
@@ -227,6 +327,7 @@ class AgentWorker:
         steps: Sequence[str],
         result: TaskResult,
         app_version: str | None = None,
+        script: Sequence[ScriptStep] = (),
     ) -> None:
         if self._memory is None or app is None:
             return
@@ -238,6 +339,7 @@ class AgentWorker:
                 steps=sanitize_steps(steps, plan, secrets),
                 aprendizaje=sanitize_text(result.aprendizaje, plan, secrets),
                 app_version=app_version,
+                script=sanitize_script(script, plan, secrets),
             )
             await self._memory.save_procedure(app, procedure)
         except Exception:
