@@ -47,6 +47,26 @@ def read_profile(boxes: Sequence[TextBox]) -> AppProfile:
     return AppProfile(name=name, version=_version(boxes), labels=tuple(b.text.strip() for b in menu))
 
 
+APP_NAME_RE = re.compile(r"[a-z]{4,}")
+
+
+def app_key(boxes: Sequence[TextBox]) -> str | None:
+    """Memory key of the application: the first word of its title bar ("sigecom").
+
+    OCR often returns the whole title bar as one line with the version and date, and its other words vary
+    with OCR noise, so only the leftmost name is stable enough to key procedures by.
+    """
+    title = [b for b in boxes if b.center[1] < TITLE_ROW_PX and b.text.strip()]
+    if not title:
+        return None
+    first = min(title, key=lambda b: b.x).text
+    plain = "".join(
+        ch for ch in unicodedata.normalize("NFKD", first) if not unicodedata.combining(ch)
+    ).lower()
+    match = APP_NAME_RE.search(plain)
+    return match.group(0) if match else None
+
+
 def interface_change(old: str | None, new: str) -> str:
     before = f"v{old}" if old else UNKNOWN_VERSION
     return f"cambio de interfaz detectado: {before} → v{new}"

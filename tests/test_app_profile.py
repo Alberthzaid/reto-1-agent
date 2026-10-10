@@ -1,6 +1,6 @@
 import pytest
 
-from agent.domain.app_profile import AppProfile, interface_change, read_profile, select_current
+from agent.domain.app_profile import AppProfile, app_key, interface_change, read_profile, select_current
 from agent.domain.models import Procedure, TextBox
 
 HEADER_V42 = [
@@ -67,3 +67,22 @@ def test_same_version_is_not_a_change() -> None:
 def test_interface_change_message() -> None:
     assert interface_change("3.9", "4.2") == "cambio de interfaz detectado: v3.9 → v4.2"
     assert AppProfile().version is None
+
+
+def test_app_key_is_the_app_name_even_when_the_header_is_one_ocr_line() -> None:
+    merged = [TextBox(text="SIGECOM - Distribuidora Andina v4.2 Hoy: 14/10/2026 : Usuario: operador2", x=8, y=11, w=900, h=14)]
+    assert app_key(merged) == "sigecom"
+    assert app_key(HEADER_V42) == "sigecom"
+
+
+def test_app_key_ignores_ocr_noise_in_the_menu_and_body() -> None:
+    noisy = [
+        TextBox(text="SIGECOM : Distribuidora Andina v4.2", x=8, y=10, w=300, h=14),
+        TextBox(text="chivo Comercial Cartera", x=8, y=43, w=300, h=14),
+    ]
+    assert app_key(noisy) == "sigecom"
+
+
+def test_app_key_without_header_text_is_none() -> None:
+    assert app_key([]) is None
+    assert app_key([TextBox(text="Bienvenido", x=14, y=300, w=100, h=14)]) is None

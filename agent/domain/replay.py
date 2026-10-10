@@ -142,10 +142,13 @@ class ScriptRunner:
             value = values.get(step.field)
             if value is None:
                 return f"el plan no tiene el campo '{step.field}'"
-            label = find_label(self._toolbox.boxes, step.field_label, (step.x - step.dx, step.y - step.dy))
-            if label is None:
-                return f"no se encontró el campo '{step.field_label}' en la pantalla"
-            x, y = _clamp(label.center[0] + step.dx, label.center[1] + step.dy)
+            if not step.field_label:
+                x, y = _clamp(step.x, step.y)
+            else:
+                label = find_label(self._toolbox.boxes, step.field_label, (step.x - step.dx, step.y - step.dy))
+                if label is None:
+                    return f"no se encontró el campo '{step.field_label}' en la pantalla"
+                x, y = _clamp(label.center[0] + step.dx, label.center[1] + step.dy)
             fields.append({"x": x, "y": y, "value": value})
         if len(fields) == 1:
             only = fields[0]
