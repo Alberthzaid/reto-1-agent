@@ -9,7 +9,7 @@ from agent.domain.guard import Guard
 from agent.domain.models import Classification, TaskStatus, TextBox
 from agent.domain.policy import Orientation, Policy
 from agent.domain.tools import ToolBox
-from agent.infra.falco_classifier import FalcoClassifier
+from agent.infra.falco_classifier import FALCO_QUESTIONS, FalcoClassifier
 from tests.fakes import FakeClock, FakeModel, FakeReader, FakeScreen, FakeSettler, tool_decision
 
 
@@ -17,37 +17,30 @@ class StubFalco:
     def __init__(self, result: dict | Exception | None = None, delay: float = 0.0) -> None:
         self.result = result or {}
         self.delay = delay
+        self.requests: list[tuple[str, dict]] = []
 
-    def prediction(self, state: str, questions: dict) -> dict:
+    async def request(self, url: str, payload: dict) -> dict:
+        self.requests.append((url, payload))
         if self.delay:
-            import time
-
-            time.sleep(self.delay)
+            await asyncio.sleep(self.delay)
         if isinstance(self.result, Exception):
             raise self.result
         return self.result
 
 
 async def loaded_classifier(model: StubFalco, clock=lambda: 0.0) -> FalcoClassifier:
-    classifier = FalcoClassifier(True, "unused", loader=lambda _path: model, clock=clock)
-    task = classifier.start()
-    assert task is not None
-    await task
-    return classifier
+    return FalcoClassifier(True, "http://falco.example.test", requester=model.request, clock=clock)
 
 
 @pytest.mark.asyncio
 async def test_disabled_or_missing_falco_never_changes_the_flow() -> None:
-    classifier = FalcoClassifier(False, "missing-model")
+    classifier = FalcoClassifier(False, "http://falco.example.test")
     assert await classifier.classify("crear cliente") is None
 
 
 @pytest.mark.asyncio
-async def test_enabled_falco_without_optional_dependencies_degrades_to_none() -> None:
-    classifier = FalcoClassifier(True, "missing-model")
-    load_task = classifier.start()
-    assert load_task is not None
-    await load_task
+async def test_unavailable_falco_endpoint_degrades_to_none() -> None:
+    classifier = await loaded_classifier(StubFalco(RuntimeError("Falco no responde")))
     assert await classifier.classify("crear cliente") is None
 
 
@@ -92,20 +85,23 @@ async def test_circuit_breaker_stops_calls_for_ten_minutes() -> None:
 
 @pytest.mark.asyncio
 async def test_high_confidence_hint_is_exposed_without_changing_worker_contract() -> None:
-    classifier = await loaded_classifier(
-        StubFalco(
-            {
-                "tipo": {"type": "choice", "choice": "eliminar", "confidence": 0.9},
-                "destructiva": {"type": "noul", "noul": 0.95},
-                "dos_datos": {"type": "noul", "noul": 0.9},
-            }
-        )
+    falco = StubFalco(
+        {
+            "tipo": {"type": "choice", "choice": "eliminar", "confidence": 0.9},
+            "destructiva": {"type": "noul", "noul": 0.95},
+            "dos_datos": {"type": "noul", "noul": 0.9},
+        }
     )
+    classifier = await loaded_classifier(falco)
     hint = await classifier.classify("eliminar dos clientes")
     assert hint is not None
     assert hint.task_type == "eliminar"
     assert hint.destructive is True
     assert hint.two_data is True
+    assert len(falco.requests) == 1
+    url, payload = falco.requests[0]
+    assert url == "http://falco.example.test/v1/decide"
+    assert payload == {"state": "eliminar dos clientes", "questions": FALCO_QUESTIONS}
 
 
 @pytest.mark.asyncio

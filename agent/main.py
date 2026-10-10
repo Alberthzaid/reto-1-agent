@@ -63,7 +63,7 @@ for _secret in (settings.anthropic_api_key, settings.team_token, settings.deskto
     register_secret(_secret)
 
 memory = SqliteMemory(Path(settings.data_dir) / "agent.db")
-falco = FalcoClassifier(settings.falco_enabled, settings.falco_model_dir)
+falco = FalcoClassifier(settings.falco_enabled, settings.falco_base_url)
 manager = TaskManager(
     memory=memory,
     worker_factory=build_worker_factory(settings, falco, memory),
@@ -73,6 +73,4 @@ manager = TaskManager(
 app = create_app(
     manager,
     settings.team_token,
-    startup_services=(falco.start,),
-    shutdown_services=(falco.stop,),
 )

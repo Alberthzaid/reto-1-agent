@@ -52,7 +52,7 @@ class Settings:
     data_dir: str = "data"
     tesseract_cmd: str | None = None
     falco_enabled: bool = False
-    falco_model_dir: str = "model_s1"
+    falco_base_url: str = "http://127.0.0.1:8000"
     max_concurrent_tasks: int = 8
     desktop_url: str | None = None
     desktop_password: str | None = None
@@ -75,7 +75,7 @@ class Settings:
             data_dir=source.get("DATA_DIR") or cls.data_dir,
             tesseract_cmd=_optional(source, "TESSERACT_CMD"),
             falco_enabled=_parse_bool(source, "FALCO_ENABLED", cls.falco_enabled),
-            falco_model_dir=source.get("FALCO_MODEL_DIR") or cls.falco_model_dir,
+            falco_base_url=source.get("FALCO_BASE_URL") or cls.falco_base_url,
             max_concurrent_tasks=_parse_int(source, "MAX_CONCURRENT_TASKS", cls.max_concurrent_tasks),
             desktop_url=_optional(source, "DESKTOP_URL"),
             desktop_password=_optional(source, "DESKTOP_PASSWORD"),

@@ -13,7 +13,7 @@ def test_defaults_with_only_secrets() -> None:
     assert s.data_dir == "data"
     assert s.tesseract_cmd is None
     assert s.falco_enabled is False
-    assert s.falco_model_dir == "model_s1"
+    assert s.falco_base_url == "http://127.0.0.1:8000"
     assert s.max_concurrent_tasks == 8
     assert s.desktop_url is None and s.desktop_password is None
 
@@ -33,6 +33,12 @@ def test_overrides_parse_types() -> None:
     assert s.max_concurrent_tasks == 2
     assert s.tesseract_cmd == "/usr/bin/tesseract"
     assert s.log_level == "DEBUG"
+
+
+def test_falco_base_url_can_be_overridden() -> None:
+    assert Settings.from_env({"FALCO_BASE_URL": "http://falco.example.test:9000"}).falco_base_url == (
+        "http://falco.example.test:9000"
+    )
 
 
 @pytest.mark.parametrize("raw,expected", [("1", True), ("YES", True), ("false", False), ("0", False), ("", False)])
