@@ -50,10 +50,10 @@ Note: strategy is `single-pr`, so a single ~1600-line PR requires `size:exceptio
 
 ## PR 2b: VncScreen, Mock, Recorder (Stage 2)
 
-- [ ] 3.1 RED+GREEN `dev_tools/mock_vnc_server.py`: real DES, 600ms delayed square repaint, per-key mark, `chunk_size`, `events`, versions 3.3/3.8.
-- [ ] 3.2 RED `tests/test_rfb.py` integration: auth OK/fail, refused, unsupported security, `chunk_size=1,7`, CopyRect, loop error propagation.
-- [ ] 3.3 RED `tests/test_vnc_screen.py`: screenshot RGB 1280x800 copy; click timings (50/150ms), double (80ms), right mask 4; `last_change_ts` advances after delayed repaint.
-- [ ] 3.4 RED same file: type_text spacing 15-20ms, key combo press/release order, blocked key, scroll (+ btn4 mask 8, - btn5 mask 16, one press/release per step), out-of-bounds `ValueError`.
-- [ ] 3.5 GREEN `agent/infra/vnc/vnc_screen.py`: `VncScreen` implementing `Screen`; `register_secret(password)`.
-- [ ] 3.6 GREEN `dev_tools/record_screens.py`: PNGs to `data/screens/`, creds from env only.
-- [ ] 3.7 Run `uv run pytest`; manual smoke on real desktop, then `POST /__reset`.
+- [x] 3.1 RED+GREEN `dev_tools/mock_vnc_server.py`: real DES, 600ms delayed square repaint, per-key mark, `chunk_size`, `events`, versions 3.3/3.8.
+- [x] 3.2 RED `tests/test_rfb.py` integration: auth OK/fail, refused, unsupported security, `chunk_size=1,7`, CopyRect, loop error propagation.
+- [x] 3.3 RED `tests/test_vnc_screen.py`: screenshot RGB 1280x800 copy; click timings (50/150ms), double (80ms), right mask 4; `last_change_ts` advances after delayed repaint.
+- [x] 3.4 RED same file: type_text spacing 15-20ms, key combo press/release order, blocked key, scroll (+ btn4 mask 8, - btn5 mask 16, one press/release per step), out-of-bounds `ValueError`.
+- [x] 3.5 GREEN `agent/infra/vnc/vnc_screen.py`: `VncScreen` implementing `Screen`; `register_secret(password)`.
+- [x] 3.6 GREEN `dev_tools/record_screens.py`: PNGs to `data/screens/`, creds from env only.
+- [x] 3.7 Run `uv run pytest` (150 passed); manual smoke on real desktop via `record_screens` saved a correct 1280x800 capture (read-only, no `POST /__reset` needed).
