@@ -2,6 +2,11 @@ services:
   agent:
     build: .
     env_file: .env
+    environment:
+      # Control panel at /ui for the jury: user `admin`, password `admin` unless .env sets UI_PASSWORD.
+      # The API keeps requiring TEAM_TOKEN.
+      UI_ENABLED: ${UI_ENABLED:-true}
+      UI_PASSWORD: ${UI_PASSWORD:-admin}
     volumes:
       - ./data:/app/data
     restart: always

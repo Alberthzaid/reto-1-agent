@@ -1,0 +1,8 @@
+.env
+.git
+.venv
+__pycache__
+*.py[cod]
+.pytest_cache
+data
+capturas_prueba
