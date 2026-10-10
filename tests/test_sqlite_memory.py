@@ -150,3 +150,39 @@ async def test_old_database_without_version_column_is_migrated(tmp_path: Path) -
     assert (legacy.steps, legacy.exitos, legacy.app_version) == (("click 'Guardar'",), 2, None)
     await memory.save_procedure(APP, Procedure(APP, INTENT, ("click 'Aplicar'",), app_version="4.2"))
     assert {p.app_version for p in await memory.procedures(APP, INTENT)} == {None, "4.2"}
+
+
+@pytest.mark.asyncio
+async def test_list_tasks_returns_newest_first(memory: SqliteMemory) -> None:
+    from datetime import datetime, timedelta, timezone
+
+    from agent.domain.models import Task
+
+    now = datetime.now(timezone.utc)
+    for i in range(3):
+        await memory.save_task(Task(id=f"t{i}", instruction=f"i{i}", desktop_url="wss://d",
+                                    created_at=now + timedelta(seconds=i)))
+    assert [t.id for t in await memory.list_tasks(limit=2)] == ["t2", "t1"]
+
+
+@pytest.mark.asyncio
+async def test_list_and_delete_procedures(memory: SqliteMemory) -> None:
+    assert memory.has_procedures_table() is True
+    first = Procedure(app=APP, intent=INTENT, steps=("abrir Clientes", "clic en Nuevo"), aprendizaje="usar menú")
+    second = Procedure(app=APP, intent="consultar:factura", steps=("abrir Facturas",))
+    await memory.save_procedure(APP, first)
+    await memory.save_procedure(APP, first)
+    await memory.save_procedure(APP, second)
+    listed = await memory.list_procedures()
+    assert listed[0] == Procedure(app=APP, intent=INTENT, steps=first.steps, aprendizaje="usar menú", exitos=2)
+    assert len(listed) == 2
+    assert await memory.delete_procedure(APP, INTENT, first.steps) is True
+    assert await memory.delete_procedure(APP, INTENT, first.steps) is False
+    assert [p.intent for p in await memory.list_procedures()] == ["consultar:factura"]
+
+
+def test_has_procedures_table_false_on_legacy_db(tmp_path: Path) -> None:
+    memory = SqliteMemory(tmp_path / "legacy.db")
+    with sqlite3.connect(tmp_path / "legacy.db") as connection:
+        connection.execute("DROP TABLE procedures")
+    assert memory.has_procedures_table() is False

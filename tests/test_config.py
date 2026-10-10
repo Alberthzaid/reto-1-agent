@@ -103,3 +103,9 @@ def test_explicit_models_win_over_openrouter_defaults() -> None:
     )
     assert s.model_fast == "anthropic/claude-haiku-5.5"
     assert s.model_strong == "anthropic/claude-opus-5.5"
+
+
+@pytest.mark.parametrize(("raw", "expected"), [(None, False), ("1", True), ("0", False), ("true", True)])
+def test_ui_enabled_flag(raw: str | None, expected: bool) -> None:
+    env = {} if raw is None else {"UI_ENABLED": raw}
+    assert Settings.from_env(env).ui_enabled is expected

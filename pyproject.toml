@@ -17,3 +17,6 @@ dependencies = [
     "uvicorn[standard]>=0.54.0",
     "websockets>=17.2",
 ]
+
+[project.optional-dependencies]
+ui = ["gradio>=5"]

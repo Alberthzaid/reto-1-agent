@@ -57,6 +57,7 @@ class Settings:
     desktop_url: str | None = None
     desktop_password: str | None = None
     log_level: str = "INFO"
+    ui_enabled: bool = False
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "Settings":
@@ -80,6 +81,7 @@ class Settings:
             desktop_url=_optional(source, "DESKTOP_URL"),
             desktop_password=_optional(source, "DESKTOP_PASSWORD"),
             log_level=source.get("LOG_LEVEL") or cls.log_level,
+            ui_enabled=_parse_bool(source, "UI_ENABLED", cls.ui_enabled),
         )
 
     def require_desktop(self) -> tuple[str, str]:
