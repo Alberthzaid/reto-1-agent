@@ -210,28 +210,31 @@ def _config_tab(ctx: PanelContext, panel: gr.Blocks) -> None:
     with gr.Row():
         time_limit = gr.Number(label="Tiempo límite (s)", precision=0, minimum=1)
         max_turns = gr.Number(label="Máximo de turnos", precision=0, minimum=1)
+        replay_min = gr.Number(label="Éxitos mínimos para repetir desde memoria", precision=0, minimum=1)
         falco = gr.Checkbox(label="Falco activado")
     combos = gr.Textbox(label="Combinaciones de teclas bloqueadas (separadas por comas)")
     with gr.Row():
         apply_button = gr.Button("Aplicar", variant="primary")
         restore_button = gr.Button("Restaurar")
-    fields = [model_fast, model_strong, time_limit, max_turns, falco, combos]
+    fields = [model_fast, model_strong, time_limit, max_turns, replay_min, falco, combos]
+    ConfigFields = tuple[str, str, int, int, int, bool, str]
 
-    def as_fields(values: RuntimeValues) -> tuple[str, str, int, int, bool, str]:
+    def as_fields(values: RuntimeValues) -> ConfigFields:
         return (values.model_fast, values.model_strong, values.time_limit_sec, values.max_turns,
-                values.falco_enabled, ", ".join(values.blocked_combos))
+                values.replay_min_successes, values.falco_enabled, ", ".join(values.blocked_combos))
 
-    def load() -> tuple[str, str, int, int, bool, str]:
+    def load() -> ConfigFields:
         return as_fields(ctx.runtime.current())
 
-    def apply(fast: str, strong: str, limit: float | None, turns: float | None, falco_on: bool,
-              combo_text: str) -> tuple[str, str, int, int, bool, str]:
+    def apply(fast: str, strong: str, limit: float | None, turns: float | None, replay: float | None,
+              falco_on: bool, combo_text: str) -> ConfigFields:
         try:
             values = ctx.runtime.apply(
                 model_fast=fast or "",
                 model_strong=strong or "",
                 time_limit_sec=int(limit or 0),
                 max_turns=int(turns or 0),
+                replay_min_successes=int(replay or 0),
                 falco_enabled=bool(falco_on),
                 blocked_combos=views.parse_combos(combo_text or ""),
             )
@@ -241,7 +244,7 @@ def _config_tab(ctx: PanelContext, panel: gr.Blocks) -> None:
         gr.Info("Configuración aplicada: se usará en la próxima tarea.")
         return as_fields(values)
 
-    def restore() -> tuple[str, str, int, int, bool, str]:
+    def restore() -> ConfigFields:
         values = ctx.runtime.restore()
         log.info("configuración de ejecución restaurada a los valores de .env")
         gr.Info("Configuración restaurada a los valores de .env.")

@@ -166,3 +166,34 @@ class RoutedModel(FakeModel):
         self.requests.append({"system": system, "messages": copy.deepcopy(messages), "tools": tools})
         self.live_messages.append(messages)
         return self.route(system, messages, tools)
+
+
+class TypingReader(FakeReader):
+    """Full-screen reads return `boxes`; a region read returns what was last typed into each field whose
+    click point lies inside the region (a perfect reread), else the boxes inside the region."""
+
+    def __init__(self, screen: FakeScreen, boxes: list[TextBox] | None = None) -> None:
+        super().__init__(boxes)
+        self.screen = screen
+
+    def _typed(self) -> dict[tuple[int, int], str]:
+        typed: dict[tuple[int, int], str] = {}
+        point: tuple[int, int] | None = None
+        for action in self.screen.actions:
+            if action[0] == "click":
+                point = (action[1], action[2])
+            elif action[0] == "type_text" and point is not None:
+                typed[point] = action[1]
+        return typed
+
+    async def read(self, img: Image.Image, region: tuple[int, int, int, int] | None = None) -> list[TextBox]:
+        if region is None:
+            return await super().read(img, region)
+        self.calls.append(region)
+        x, y, w, h = region
+        found = [
+            TextBox(text=text, x=px - 4, y=py - 4, w=8, h=8)
+            for (px, py), text in self._typed().items()
+            if x <= px < x + w and y <= py < y + h
+        ]
+        return found or [b for b in self.boxes if x <= b.center[0] < x + w and y <= b.center[1] < y + h]

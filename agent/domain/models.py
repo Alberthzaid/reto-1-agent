@@ -61,6 +61,26 @@ class Commit:
 
 
 @dataclass(frozen=True, slots=True)
+class ScriptStep:
+    """One replayable step of a learned route. Holds labels and plan field NAMES, never typed values.
+
+    kind: "click" (on the button labeled `anchor`, last seen at x,y), "fill" (the input at offset dx,dy
+    from the label `field_label`, typed with the plan value of `field`) or "key" (combo in `anchor`).
+    """
+
+    kind: str
+    anchor: str = ""
+    x: int = 0
+    y: int = 0
+    field_label: str = ""
+    field: str = ""
+    commit: bool = False
+    dismissal: bool = False
+    dx: int = 0
+    dy: int = 0
+
+
+@dataclass(frozen=True, slots=True)
 class Procedure:
     """A navigation route that completed a verified task: short step texts, never customer data."""
 
@@ -70,6 +90,8 @@ class Procedure:
     aprendizaje: str = ""
     exitos: int = 0
     app_version: str | None = None  # version shown by the app when the route was learned ("4.2")
+    script: tuple[ScriptStep, ...] = ()  # replayable form of the route; empty when it could not be recorded
+    fallos_replay: int = 0  # consecutive replays of `script` that stopped or were not verified
 
 
 @dataclass(frozen=True, slots=True)

@@ -14,7 +14,7 @@ from agent.observability.traces import TraceStep
 
 TASK_HEADERS = ["id", "estado", "instrucción", "fecha"]
 STEP_HEADERS = ["paso", "acción", "nota"]
-PROCEDURE_HEADERS = ["app", "intención", "éxitos", "pasos"]
+PROCEDURE_HEADERS = ["app", "intención", "éxitos", "pasos", "guion"]
 RESULT_HEADERS = ["id", "pasa", "fallos", "estado", "segundos"]
 HISTORY_HEADERS = ["reporte", "aciertos", "falsos éxitos", "tiempo medio (s)"]
 LOG_LEVELS = ["TODOS", "DEBUG", "INFO", "WARNING", "ERROR"]
@@ -132,7 +132,7 @@ def log_text(records: Sequence[Mapping[str, Any]]) -> str:
 
 def procedure_rows(procedures: Sequence[Procedure]) -> list[list[Any]]:
     return [
-        [redact(p.app), redact(p.intent), p.exitos, redact(" > ".join(p.steps))]
+        [redact(p.app), redact(p.intent), p.exitos, redact(" > ".join(p.steps)), f"guion: {len(p.script)} pasos"]
         for p in procedures
     ]
 
