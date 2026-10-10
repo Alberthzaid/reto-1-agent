@@ -9,14 +9,14 @@ Structured logs that redact registered secrets everywhere, including tracebacks.
 `register_secret(value)` MUST cause every later log record to replace that value with "***" in the message, args and traceback text.
 
 #### Scenario: Message masked
-- GIVEN secret "s3cret" is registered
-- WHEN `log.info("pw=s3cret")` is emitted
-- THEN captured output contains "pw=***" and lacks "s3cret"
+- GIVEN secret "redaction-fixture-value" is registered
+- WHEN `log.info("pw=redaction-fixture-value")` is emitted
+- THEN captured output contains "pw=***" and lacks "redaction-fixture-value"
 
 #### Scenario: Args masked
-- GIVEN secret "s3cret" is registered
-- WHEN `log.info("pw=%s", "s3cret")` is emitted
-- THEN captured output lacks "s3cret"
+- GIVEN secret "redaction-fixture-value" is registered
+- WHEN `log.info("pw=%s", "redaction-fixture-value")` is emitted
+- THEN captured output lacks "redaction-fixture-value"
 
 #### Scenario: Traceback masked
 - GIVEN a registered secret in an exception message
