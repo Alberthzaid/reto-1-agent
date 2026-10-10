@@ -38,6 +38,13 @@ def test_fingerprint_ignores_body_and_header_date(memory: SqliteMemory) -> None:
     assert len(first) == 16
 
 
+def test_fingerprint_without_header_or_menu_words_is_empty(memory: SqliteMemory) -> None:
+    # A blank or half-received first frame must not put every app under the same key.
+    assert memory.fingerprint([]) == ""
+    assert memory.fingerprint(body("Papelería Los Andes", "901234567")) == ""
+    assert memory.fingerprint([TextBox(text="14/10/2026", x=1000, y=10, w=100, h=20)]) == ""
+
+
 def test_fingerprint_differs_between_apps(memory: SqliteMemory) -> None:
     assert memory.fingerprint(header(["Clientes", "Facturas"])) != memory.fingerprint(header(["Pacientes", "Citas"]))
 
@@ -101,3 +108,45 @@ async def test_rejects_digits_and_emails(memory: SqliteMemory, procedure: Proced
 async def test_tasks_table_still_works_alongside_procedures(memory: SqliteMemory) -> None:
     assert await memory.load_task("missing") is None
     assert await memory.procedures(APP, INTENT) == []
+
+
+# --- FR-0153: procedures remember the app version they were learned on -----------------------------
+
+
+@pytest.mark.asyncio
+async def test_procedures_keep_their_app_version(memory: SqliteMemory) -> None:
+    await memory.save_procedure(APP, Procedure(APP, INTENT, ("click 'Crear cliente'",), app_version="4.2"))
+    await memory.save_procedure(APP, Procedure(APP, INTENT, ("click 'Nuevo cliente'",)))
+    versions = {p.steps[0]: p.app_version for p in await memory.procedures(APP, INTENT)}
+    assert versions == {"click 'Crear cliente'": "4.2", "click 'Nuevo cliente'": None}
+
+
+@pytest.mark.asyncio
+async def test_same_steps_on_a_new_version_restart_their_count(memory: SqliteMemory) -> None:
+    steps = ("click 'Clientes'",)
+    for _ in range(3):
+        await memory.save_procedure(APP, Procedure(APP, INTENT, steps, app_version="3.9"))
+    await memory.save_procedure(APP, Procedure(APP, INTENT, steps, app_version="4.2"))
+    [procedure] = await memory.procedures(APP, INTENT)
+    assert (procedure.app_version, procedure.exitos) == ("4.2", 1)
+
+
+@pytest.mark.asyncio
+async def test_old_database_without_version_column_is_migrated(tmp_path: Path) -> None:
+    db = tmp_path / "agent.db"
+    with sqlite3.connect(db) as connection:
+        connection.execute(
+            "CREATE TABLE procedures (app TEXT NOT NULL, intent TEXT NOT NULL, steps TEXT NOT NULL, "
+            "aprendizaje TEXT NOT NULL, exitos INTEGER NOT NULL, updated_at TEXT NOT NULL, "
+            "PRIMARY KEY (app, intent, steps))"
+        )
+        connection.execute(
+            "INSERT INTO procedures VALUES (?, ?, ?, ?, ?, ?)",
+            (APP, INTENT, '["click \'Guardar\'"]', "Guardar abajo.", 2, "2026-10-01T00:00:00+00:00"),
+        )
+    memory = SqliteMemory(db)
+    SqliteMemory(db)  # opening twice must not fail
+    [legacy] = await memory.procedures(APP, INTENT)
+    assert (legacy.steps, legacy.exitos, legacy.app_version) == (("click 'Guardar'",), 2, None)
+    await memory.save_procedure(APP, Procedure(APP, INTENT, ("click 'Aplicar'",), app_version="4.2"))
+    assert {p.app_version for p in await memory.procedures(APP, INTENT)} == {None, "4.2"}

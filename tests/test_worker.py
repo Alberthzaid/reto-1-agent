@@ -277,6 +277,47 @@ async def test_verified_success_saves_the_procedure(tmp_path: Path) -> None:
     assert [(p.steps, p.exitos) for p in procs] == [(("click 'Guardar'",), 1)]
 
 
+class LateReader(FakeReader):
+    """Full-screen reads return nothing until the first frame has fully arrived."""
+
+    def __init__(self, boxes: list[TextBox], empty_reads: int) -> None:
+        super().__init__(boxes)
+        self.empty_reads = empty_reads
+
+    async def read(self, img: Any, region: tuple[int, int, int, int] | None = None) -> list[TextBox]:
+        if region is None and self.empty_reads > 0:
+            self.empty_reads -= 1
+            self.calls.append(region)
+            return []
+        return await super().read(img, region)
+
+
+@pytest.mark.asyncio
+async def test_incomplete_first_frame_is_observed_again_before_fingerprinting(tmp_path: Path) -> None:
+    memory = SqliteMemory(tmp_path / "agent.db")
+    worker, _, _, _ = build(HAPPY_FAST, [CONFIRM], memory=memory, reader=LateReader([HOY, GUARDAR], 1))
+    status, _ = await worker.run()
+    assert status is TaskStatus.terminada
+    assert await memory.procedures(memory.fingerprint([HOY, GUARDAR]), INTENT)
+    with sqlite3.connect(tmp_path / "agent.db") as connection:
+        apps = [row[0] for row in connection.execute("SELECT app FROM procedures")]
+    assert apps == [memory.fingerprint([HOY, GUARDAR])]
+    assert "" not in apps
+
+
+@pytest.mark.asyncio
+async def test_unidentified_app_neither_recalls_nor_saves(tmp_path: Path) -> None:
+    # Only body text (no header or menu words): the app cannot be told apart from any other one.
+    memory = SqliteMemory(tmp_path / "agent.db")
+    # No date on screen either, so ORIENT asks the model once before planning.
+    orient = tool_decision(("report_orientation", {"app": "", "module": "", "today": ""}))
+    worker, _, _, _ = build([orient, *HAPPY_FAST], [CONFIRM], memory=memory, reader=FakeReader([GUARDAR]))
+    assert memory.fingerprint([GUARDAR]) == ""
+    status, _ = await worker.run()
+    assert status is TaskStatus.terminada
+    assert dump_procedures(tmp_path / "agent.db") == "[]"
+
+
 @pytest.mark.asyncio
 async def test_verifier_rejection_saves_nothing(tmp_path: Path) -> None:
     memory = SqliteMemory(tmp_path / "agent.db")
@@ -414,3 +455,53 @@ async def test_second_task_uses_hints_and_needs_fewer_turns(tmp_path: Path) -> N
     assert _execute_turns(second_model) < _execute_turns(first_model)
     procs = await memory.procedures(memory.fingerprint([HOY, CLIENTES, GUARDAR]), INTENT)
     assert procs[0].exitos >= 1
+
+
+# --- FR-0153: a new app version invalidates learned procedures ---------------------------------------
+
+VERSION_42 = TextBox(text="v4.2", x=277, y=10, w=28, h=14)
+
+
+@pytest.mark.asyncio
+async def test_procedures_from_another_version_are_not_hints(tmp_path: Path) -> None:
+    memory = SqliteMemory(tmp_path / "agent.db")
+    boxes = [HOY, VERSION_42, GUARDAR]
+    app = memory.fingerprint(boxes)
+    await memory.save_procedure(app, Procedure(app, INTENT, ("click 'Nuevo cliente'",), "Usar Guardar.", app_version="3.9"))
+    trace = FakeTrace()
+    worker, _, fast_model, _ = build(HAPPY_FAST, [CONFIRM], reader=FakeReader(boxes), memory=memory, trace=trace)
+    status, _ = await worker.run()
+    assert status is TaskStatus.terminada
+    intro = str(fast_model.requests[1]["messages"][0]["content"])
+    assert "Hints from previous tasks" not in intro and "Nuevo cliente" not in intro
+    notes = " ".join(step[2] for step in trace.steps)
+    assert "cambio de interfaz detectado: v3.9 → v4.2" in notes
+    procs = await memory.procedures(app, INTENT)
+    assert {(p.steps, p.app_version) for p in procs} == {
+        (("click 'Nuevo cliente'",), "3.9"), (("click 'Guardar'",), "4.2"),
+    }
+    # The stale procedure is not penalized for a run it did not take part in.
+    assert {p.exitos for p in procs} == {1}
+
+
+@pytest.mark.asyncio
+async def test_interface_change_is_logged(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    memory = SqliteMemory(tmp_path / "agent.db")
+    boxes = [HOY, VERSION_42, GUARDAR]
+    app = memory.fingerprint(boxes)
+    await memory.save_procedure(app, Procedure(app, INTENT, ("click 'Guardar'",), app_version="3.9"))
+    worker, _, _, _ = build(HAPPY_FAST, [CONFIRM], reader=FakeReader(boxes), memory=memory)
+    with caplog.at_level("INFO", logger="agent.application.worker"):
+        await worker.run()
+    assert "cambio de interfaz detectado: v3.9 → v4.2" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_same_version_procedures_are_still_hints(tmp_path: Path) -> None:
+    memory = SqliteMemory(tmp_path / "agent.db")
+    boxes = [HOY, VERSION_42, GUARDAR]
+    app = memory.fingerprint(boxes)
+    await memory.save_procedure(app, Procedure(app, INTENT, ("click 'Guardar'",), app_version="4.2"))
+    worker, _, fast_model, _ = build(HAPPY_FAST, [CONFIRM], reader=FakeReader(boxes), memory=memory)
+    await worker.run()
+    assert "Hints from previous tasks" in str(fast_model.requests[1]["messages"][0]["content"])

@@ -9,6 +9,7 @@ from typing import Protocol, runtime_checkable
 from urllib.parse import urlparse
 
 from agent.config import Settings
+from agent.domain.app_profile import select_current
 from agent.domain.budget import task_deadline
 from agent.domain.guard import Guard
 from agent.domain.models import Plan, Procedure, TaskResult, TaskStatus, TextBox
@@ -131,6 +132,9 @@ class AgentWorker:
             trace=trace, deadline=exec_deadline, sleep=self._sleep,
         )
         image, boxes = await toolbox.observe()
+        if not boxes:
+            # The first Raw frame (~4 MB) may still be arriving: wait for a stable screen and look again.
+            image, boxes = await toolbox.settle_and_observe()
         policy = Policy(
             self._model_fast,
             toolbox,
@@ -143,7 +147,12 @@ class AgentWorker:
         orientation = await policy.orient(image, boxes)
         plan = await policy.plan(self._instruction, orientation, image, boxes)
         intent = intent_key(plan)
-        hints = await self._recall(app, intent) if plan.feasible else []
+        recalled = await self._recall(app, intent) if plan.feasible else []
+        hints, change = select_current(recalled, orientation.version)
+        if change:
+            # Routes learned on another interface version would point the model at buttons that moved.
+            log.info("%s; se descartan %d procedimientos guardados", change, len(recalled) - len(hints))
+            await toolbox.trace_event(change)
         result = await policy.run_plan(self._instruction, plan, orientation, image, boxes, hints=hints)
         if result.estado is not TaskStatus.terminada:
             await self._penalize(app, intent, hints)
@@ -156,7 +165,7 @@ class AgentWorker:
             evidence=toolbox.commit_evidence,
         )
         if confirmed:
-            await self._remember(app, intent, plan, toolbox.steps, result)
+            await self._remember(app, intent, plan, toolbox.steps, result, orientation.version)
             return result
         log.info("el verificador no confirmó el resultado")
         await self._penalize(app, intent, hints)
@@ -172,7 +181,8 @@ class AgentWorker:
         if self._memory is None:
             return None
         try:
-            return self._memory.fingerprint(boxes)
+            # An empty fingerprint means the app could not be identified: no recall, no save.
+            return self._memory.fingerprint(boxes) or None
         except Exception:
             log.exception("no se pudo identificar la aplicación para la memoria de procedimientos")
             return None
@@ -187,7 +197,13 @@ class AgentWorker:
             return []
 
     async def _remember(
-        self, app: str | None, intent: str, plan: Plan, steps: Sequence[str], result: TaskResult
+        self,
+        app: str | None,
+        intent: str,
+        plan: Plan,
+        steps: Sequence[str],
+        result: TaskResult,
+        app_version: str | None = None,
     ) -> None:
         if self._memory is None or app is None:
             return
@@ -198,6 +214,7 @@ class AgentWorker:
                 intent=intent,
                 steps=sanitize_steps(steps, plan, secrets),
                 aprendizaje=sanitize_text(result.aprendizaje, plan, secrets),
+                app_version=app_version,
             )
             await self._memory.save_procedure(app, procedure)
         except Exception:

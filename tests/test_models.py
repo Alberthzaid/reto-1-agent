@@ -101,9 +101,11 @@ def test_plan_defaults_and_fields() -> None:
 
 
 def test_procedure_holds_navigation_text_learning_and_successes() -> None:
-    assert [f.name for f in dataclasses.fields(Procedure)] == ["app", "intent", "steps", "aprendizaje", "exitos"]
+    assert [f.name for f in dataclasses.fields(Procedure)] == [
+        "app", "intent", "steps", "aprendizaje", "exitos", "app_version",
+    ]
     proc = Procedure(app="a", intent="crear:cliente")
-    assert proc.steps == () and proc.aprendizaje == "" and proc.exitos == 0
+    assert proc.steps == () and proc.aprendizaje == "" and proc.exitos == 0 and proc.app_version is None
     assert get_type_hints(Procedure)["steps"] == tuple[str, ...]
 
 

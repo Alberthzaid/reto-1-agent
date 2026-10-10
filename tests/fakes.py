@@ -83,9 +83,11 @@ class FakeSettler:
         self.screen = screen
         self.changed = changed
         self.calls: list[float] = []
+        self.kwargs: list[dict[str, float]] = []
 
-    async def settle(self, since: float) -> tuple[Image.Image, bool]:
+    async def settle(self, since: float, **options: float) -> tuple[Image.Image, bool]:
         self.calls.append(since)
+        self.kwargs.append(options)
         return await self.screen.screenshot(), self.changed
 
 

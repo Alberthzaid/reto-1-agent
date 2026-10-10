@@ -9,6 +9,7 @@ from typing import Any
 
 from PIL import Image
 
+from agent.domain.app_profile import read_profile
 from agent.domain.dates import NO_DATE_NOTE, parse_app_date, parse_date, relative_context
 from agent.domain.guard import Guard
 from agent.domain.models import (
@@ -90,6 +91,8 @@ class Orientation:
     today: str | None = None
     app: str = ""
     module: str = ""
+    version: str | None = None  # read in code from the header ("v4.2" -> "4.2")
+    menu: tuple[str, ...] = ()  # top menu labels, left to right
 
 
 def load_prompt(name: str, prompts_dir: Path = PROMPTS_DIR) -> str:
@@ -112,7 +115,11 @@ def describe_plan(plan: Plan) -> str:
 
 def describe_orientation(orientation: Orientation) -> str:
     today = orientation.today or "unknown"
-    text = f"Today (date shown by the app): {today}\nApp: {orientation.app or '?'}; module: {orientation.module or '?'}"
+    version = f" (version {orientation.version})" if orientation.version else ""
+    text = (
+        f"Today (date shown by the app): {today}\n"
+        f"App: {orientation.app or '?'}{version}; module: {orientation.module or '?'}"
+    )
     parsed = parse_date(orientation.today) if orientation.today else None
     if parsed is None:
         return f"{text}\n{NO_DATE_NOTE}"
@@ -153,9 +160,13 @@ class Policy:
         return self._deadline - self._clock()
 
     async def orient(self, image: Image.Image, boxes: Sequence[TextBox]) -> Orientation:
+        profile = read_profile(boxes)
+        known = Orientation(app=profile.name, version=profile.version, menu=profile.labels)
+        if profile.version:
+            log.info("aplicación %s, versión %s", profile.name or "?", profile.version)
         app_date = parse_app_date(boxes)
         if app_date is not None:
-            return Orientation(today=app_date.strftime(APP_DATE_FORMAT))
+            return replace(known, today=app_date.strftime(APP_DATE_FORMAT))
         content = await screen_content("First screenshot of the application.", image, boxes)
         try:
             decision = await self._model.decide(
@@ -163,14 +174,15 @@ class Policy:
             )
         except Exception:
             log.exception("falló la orientación con el modelo")
-            return Orientation()
+            return known
         call = first_call(decision, "report_orientation")
         if call is None:
-            return Orientation()
+            return known
         today = parse_date(str(call.input.get("today", "")))
-        return Orientation(
+        return replace(
+            known,
             today=today.strftime(APP_DATE_FORMAT) if today is not None else None,
-            app=str(call.input.get("app", "")),
+            app=profile.name or str(call.input.get("app", "")),
             module=str(call.input.get("module", "")),
         )
 

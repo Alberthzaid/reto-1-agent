@@ -61,6 +61,10 @@ class SqliteMemory:
                 )
                 """
             )
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(procedures)")}
+            if "app_version" not in columns:
+                # Older databases: add the column in place; existing rows keep NULL (version unknown).
+                connection.execute("ALTER TABLE procedures ADD COLUMN app_version TEXT")
 
     def _connect(self) -> sqlite3.Connection:
         return sqlite3.connect(self._path)
@@ -127,6 +131,8 @@ class SqliteMemory:
             if box.y < FINGERPRINT_BAND_Y or box.x < FINGERPRINT_BAND_X
             for word in _plain_words(box.text)
         }
+        if not words:
+            return ""
         return hashlib.sha1(" ".join(sorted(words)).encode("utf-8")).hexdigest()[:16]
 
     async def procedures(self, app: str, intent: str) -> list[Procedure]:
@@ -136,7 +142,7 @@ class SqliteMemory:
         with self._connect() as connection:
             rows = connection.execute(
                 """
-                SELECT app, intent, steps, aprendizaje, exitos FROM procedures
+                SELECT app, intent, steps, aprendizaje, exitos, app_version FROM procedures
                 WHERE app = ? AND intent = ? AND exitos > 0
                 ORDER BY exitos DESC, updated_at DESC
                 LIMIT ?
@@ -144,7 +150,10 @@ class SqliteMemory:
                 (app, intent, TOP_PROCEDURES),
             ).fetchall()
         return [
-            Procedure(app=row[0], intent=row[1], steps=tuple(json.loads(row[2])), aprendizaje=row[3], exitos=row[4])
+            Procedure(
+                app=row[0], intent=row[1], steps=tuple(json.loads(row[2])), aprendizaje=row[3], exitos=row[4],
+                app_version=row[5],
+            )
             for row in rows
         ]
 
@@ -159,14 +168,16 @@ class SqliteMemory:
         with self._connect() as connection:
             connection.execute(
                 """
-                INSERT INTO procedures (app, intent, steps, aprendizaje, exitos, updated_at)
-                VALUES (?, ?, ?, ?, 1, ?)
+                INSERT INTO procedures (app, intent, steps, aprendizaje, exitos, updated_at, app_version)
+                VALUES (?, ?, ?, ?, 1, ?, ?)
                 ON CONFLICT(app, intent, steps) DO UPDATE SET
-                    exitos = MAX(procedures.exitos, 0) + 1,
+                    exitos = CASE WHEN procedures.app_version IS excluded.app_version
+                        THEN MAX(procedures.exitos, 0) + 1 ELSE 1 END,
                     aprendizaje = excluded.aprendizaje,
-                    updated_at = excluded.updated_at
+                    updated_at = excluded.updated_at,
+                    app_version = excluded.app_version
                 """,
-                (app, procedure.intent, steps, procedure.aprendizaje, _now()),
+                (app, procedure.intent, steps, procedure.aprendizaje, _now(), procedure.app_version),
             )
 
     async def penalize(self, app: str, intent: str, procedures: Sequence[Procedure]) -> None:

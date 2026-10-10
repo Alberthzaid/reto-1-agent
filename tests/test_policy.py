@@ -314,3 +314,19 @@ async def test_no_hints_block_without_hints() -> None:
     orientation, plan = await start(policy, screen, [HOY])
     await policy.run_plan(INSTRUCTION, plan, orientation, screen.image, [HOY])
     assert "Hints from previous tasks" not in str(model.requests[1]["messages"][0]["content"])
+
+
+@pytest.mark.asyncio
+async def test_orient_reads_the_app_version_and_menu_in_code() -> None:
+    policy, model, screen, _, _ = make([])
+    header = [
+        TextBox(text="SIGECOM · Distribuidora Andina", x=12, y=10, w=248, h=14),
+        TextBox(text="v4.2", x=277, y=10, w=28, h=14),
+        TextBox(text="Archivo", x=18, y=42, w=48, h=14),
+        TextBox(text="Comercial", x=90, y=42, w=65, h=14),
+    ]
+    orientation = await policy.orient(screen.image, [HOY, *header])
+    assert orientation.version == "4.2"
+    assert orientation.app == "SIGECOM · Distribuidora Andina"
+    assert orientation.menu == ("Archivo", "Comercial")
+    assert model.requests == []

@@ -69,6 +69,7 @@ class Procedure:
     steps: tuple[str, ...] = ()
     aprendizaje: str = ""
     exitos: int = 0
+    app_version: str | None = None  # version shown by the app when the route was learned ("4.2")
 
 
 @dataclass(frozen=True, slots=True)

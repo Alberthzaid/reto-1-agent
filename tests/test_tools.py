@@ -265,7 +265,7 @@ async def test_crop_label_beats_merged_full_screen_line() -> None:
     assert "Nuevo cliente" in outcome.text
     assert "confirmación registrada" not in outcome.text
     x, y, w, h = _crop_reads(reader)[0]
-    assert (w, h) == (180, 34)
+    assert (w, h) == (100, 28)
     assert x <= 110 < x + w and y <= 100 < y + h
 
 
@@ -292,7 +292,7 @@ async def test_crop_is_clamped_to_the_screen() -> None:
     toolbox, _, reader, _, _ = make(boxes=[], region_fn=lambda img, region: [])
     await toolbox.execute(call("click", x=1279, y=799))
     x, y, w, h = _crop_reads(reader)[0]
-    assert (w, h) == (180, 34)
+    assert (w, h) == (100, 28)
     assert x + w <= 1280 and y + h <= 800 and x >= 0 and y >= 0
 
 
@@ -372,3 +372,65 @@ async def test_non_commit_and_unchanged_commit_collect_no_evidence() -> None:
     unchanged, _, _, _, _ = make(changed=False, region_fn=_toast_reader)
     await unchanged.execute(call("click", x=640, y=710))
     assert unchanged.commit_evidence == []
+
+
+APLICADOS = TextBox(text="Cambios aplicados", x=1110, y=752, w=150, h=20)
+APLICADOS_RECT = (1105, 744, 156, 37)
+
+
+def _show_toast(screen: FakeScreen, reader: FakeReader, toast: TextBox = APLICADOS) -> None:
+    screen.image = Image.new("RGB", (1280, 800), "white")
+    screen.image.paste((20, 30, 120), (1105, 744, 1261, 781))
+    reader.boxes = [*reader.boxes, toast]
+
+
+@pytest.mark.asyncio
+async def test_success_notice_after_unrecognized_commit_is_kept_as_evidence() -> None:
+    # OCR garbled the save button ("Apkcar"), so the guard did not see a commit; the toast still counts.
+    toolbox, screen, reader, _, _ = make()
+    _show_toast(screen, reader)
+    await toolbox.execute(call("click", x=130, y=110))
+    assert len(toolbox.commit_evidence) == 1
+    assert toolbox.commit_evidence[0].texts == ("Cambios aplicados",)
+    assert toolbox.commit_evidence[0].image.getpixel((1150, 760)) == (20, 30, 120)
+
+
+@pytest.mark.asyncio
+async def test_success_notice_after_enter_key_is_kept_as_evidence() -> None:
+    toolbox, screen, reader, _, _ = make()
+    _show_toast(screen, reader, TextBox(text="Cliente CL-0141 guardado", x=1110, y=752, w=150, h=20))
+    await toolbox.execute(call("key", combo="enter"))
+    assert [e.texts for e in toolbox.commit_evidence] == [("Cliente CL-0141 guardado",)]
+
+
+@pytest.mark.asyncio
+async def test_notice_already_on_screen_or_outside_changes_is_not_evidence() -> None:
+    toolbox, screen, reader, _, _ = make(boxes=[BUSCAR, GUARDAR, NOMBRE, APLICADOS])
+    screen.image = Image.new("RGB", (1280, 800), "white")
+    screen.image.paste((20, 30, 120), (1105, 744, 1261, 781))
+    await toolbox.execute(call("click", x=130, y=110))
+    assert toolbox.commit_evidence == []
+
+    unchanged, _, reader2, _, _ = make()
+    reader2.boxes = [*reader2.boxes, APLICADOS]  # text appears but no pixel changed there
+    await unchanged.execute(call("click", x=130, y=110))
+    assert unchanged.commit_evidence == []
+
+
+@pytest.mark.asyncio
+async def test_non_success_text_in_changed_region_is_not_evidence() -> None:
+    toolbox, screen, reader, _, _ = make()
+    _show_toast(screen, reader, TextBox(text="Buscando clientes", x=1110, y=752, w=150, h=20))
+    await toolbox.execute(call("click", x=130, y=110))
+    assert toolbox.commit_evidence == []
+
+
+@pytest.mark.asyncio
+async def test_recognized_commit_does_not_duplicate_its_evidence() -> None:
+    toolbox, screen, reader, _, _ = make(boxes=[GARBLED_GUARDAR], region_fn=_toast_reader)
+    screen.image = Image.new("RGB", (1280, 800), "white")
+    screen.image.paste((20, 30, 120), (1057, 744, 1261, 781))
+    reader.boxes = [*reader.boxes, TOAST]
+    await toolbox.execute(call("click", x=640, y=710))
+    assert len(toolbox.commit_evidence) == 1
+    assert toolbox.commit_evidence[0].label == "Guardar"

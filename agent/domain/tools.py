@@ -4,6 +4,8 @@ import asyncio
 import base64
 import io
 import logging
+import re
+import unicodedata
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,7 +15,7 @@ import numpy as np
 from PIL import Image
 
 from agent.domain.diff import changed_regions
-from agent.domain.guard import Guard, label_at
+from agent.domain.guard import COMMIT_WORDS, Guard, assigned_codes, label_at, words
 from agent.domain.models import TextBox, ToolCall
 from agent.ports.interfaces import Reader, Screen
 
@@ -32,15 +34,47 @@ DIFF_BLOCK = 8
 DIFF_THRESHOLD = 24
 MAX_REGIONS_REPORTED = 8
 MAX_RECORDED_STEPS = 15
-# Full-screen OCR merges adjacent buttons into one line and misses light-on-dark text, so the guard
-# reads a small crop around the click point instead.
-GUARD_CROP_W = 180
-GUARD_CROP_H = 34
+# Full-screen OCR merges adjacent buttons into one line and misses light-on-dark text, so the guard reads
+# only the clicked button: its rectangle is found by color around the click point. A fixed crop read the
+# neighbor button too ("Cerrar | Aplicar"), so it is only a fallback, and a narrow one.
+BUTTON_MAX_W = 320
+BUTTON_MAX_H = 60
+BUTTON_MIN_W = 24
+BUTTON_MIN_H = 14
+BUTTON_STEP_TOL = 10  # max channel difference between neighboring pixels of one button face (gradients)
+BUTTON_SEED_TOL = 48  # max channel difference from the sampled face color
+BUTTON_SEED_HALF_W = 7
+BUTTON_SEED_HALF_H = 3
+BUTTON_SEED_SIMILAR = 12
+BUTTON_MAX_SEEDS = 6
+BUTTON_PAD_PX = 2
+GUARD_CROP_W = 100
+GUARD_CROP_H = 28
+# Commits repaint slowly (title and toast after ~1.5 s), so their observation waits longer.
+COMMIT_SETTLE: dict[str, float] = {"quiet": 0.4, "min_wait": 1.8, "max_wait": 3.5}
+# After any other click, a few small changed regions are read to notice a save the guard did not see.
+MAX_OUTCOME_REGIONS = 3
+MAX_OUTCOME_AREA = SCREEN_W * SCREEN_H // 8
+MIN_OUTCOME_W = 16
+MIN_OUTCOME_H = 8
+MAX_NOTICE_WORDS = 8
+MAX_HEADING_WORDS = 4
+OUTCOME_TARGET_HALF = 12  # area remembered around a click whose button could not be delimited
+NAVIGATION_AREA = SCREEN_W * SCREEN_H // 4  # a change this large replaced the screen (menu, list, form)
+# Clicks whose own label says they only search or close never count as commits by their outcome.
+NO_OUTCOME_WORDS: frozenset[str] = frozenset({"buscar", "filtrar", "limpiar", "consultar"})
 # After a commit, the text of what changed (toasts, dialogs) is read before it disappears.
 MAX_EVIDENCE_REGIONS = 6
 MAX_EVIDENCE_AREA = SCREEN_W * SCREEN_H // 2
 EVIDENCE_PAD_PX = 4
 MAX_EVIDENCE_CHARS = 300
+# A success notice that appears in a changed region is evidence even when OCR garbled the button and
+# the guard did not recognize the click as a commit (e.g. "Aplicar" read as "Apkcar").
+SUCCESS_NOTICE_RE = re.compile(
+    r"\b(guardad|cread|actualizad|aplicad|registrad|eliminad|anulad|exportad|exitos|correctamente)",
+    re.IGNORECASE,
+)
+NOTICE_LABEL = "aviso de éxito"
 
 _COORDS = {
     "x": {"type": "integer", "description": "Horizontal pixel, 0-1279, from the left edge."},
@@ -196,7 +230,9 @@ class TraceSink(Protocol):
 
 
 class Settles(Protocol):
-    async def settle(self, since: float) -> tuple[Image.Image, bool]: ...
+    async def settle(
+        self, since: float, quiet: float = ..., min_wait: float = ..., max_wait: float = ...
+    ) -> tuple[Image.Image, bool]: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -223,6 +259,117 @@ def guard_crop(x: int, y: int) -> tuple[int, int, int, int]:
     return left, top, GUARD_CROP_W, GUARD_CROP_H
 
 
+def _face_seeds(window: np.ndarray, px: int, py: int) -> list[tuple[int, int]]:
+    """Pixels near the click with the most common smooth color around it (the button face, not its text),
+    best first: the nearest one may sit inside a letter, so callers try several."""
+    height, width, _ = window.shape
+    top, bottom = max(0, py - BUTTON_SEED_HALF_H), min(height, py + BUTTON_SEED_HALF_H + 1)
+    left, right = max(0, px - BUTTON_SEED_HALF_W), min(width, px + BUTTON_SEED_HALF_W + 1)
+    patch = window[top:bottom, left:right].reshape(-1, 3)
+    # How many patch pixels look like each pixel; the face wins, thin text strokes lose.
+    similar = (np.max(np.abs(patch[:, None, :] - patch[None, :, :]), axis=2) <= BUTTON_SEED_SIMILAR).sum(axis=1)
+    # Text and its anti-aliased edges are not smooth: some neighbor differs a lot.
+    padded = np.pad(window, ((1, 1), (1, 1), (0, 0)), mode="edge")
+    center = padded[1:-1, 1:-1]
+    steps = np.stack(
+        [np.max(np.abs(center - padded[1 + dy:height + 1 + dy, 1 + dx:width + 1 + dx]), axis=2)
+         for dy, dx in ((-1, 0), (1, 0), (0, -1), (0, 1))]
+    ).max(axis=0)
+    smooth = (steps[top:bottom, left:right] <= BUTTON_STEP_TOL).reshape(-1)
+    ys, xs = np.divmod(np.arange(patch.shape[0]), right - left)
+    distance = (ys + top - py) ** 2 + (xs + left - px) ** 2
+    order = np.lexsort((distance, -similar, ~smooth))
+    face = patch[order[0]]
+    same = np.max(np.abs(patch - face), axis=1) <= BUTTON_SEED_SIMILAR
+    return [(int(xs[i]) + left, int(ys[i]) + top) for i in order if same[i] and smooth[i]] or [
+        (int(xs[order[0]]) + left, int(ys[order[0]]) + top)
+    ]
+
+
+def _grow_face(window: np.ndarray, sx: int, sy: int) -> np.ndarray | None:
+    """Pixels connected to the seed through small color steps; None when it outgrows a button."""
+    face = np.max(np.abs(window - window[sy, sx]), axis=2) <= BUTTON_SEED_TOL
+    h_ok = (np.max(np.abs(window[:, 1:] - window[:, :-1]), axis=2) <= BUTTON_STEP_TOL) & face[:, 1:] & face[:, :-1]
+    v_ok = (np.max(np.abs(window[1:] - window[:-1]), axis=2) <= BUTTON_STEP_TOL) & face[1:] & face[:-1]
+    reached = np.zeros(face.shape, dtype=bool)
+    reached[sy, sx] = True
+    for step in range(2 * (BUTTON_MAX_W + BUTTON_MAX_H)):
+        grown = reached.copy()
+        grown[:, 1:] |= reached[:, :-1] & h_ok
+        grown[:, :-1] |= reached[:, 1:] & h_ok
+        grown[1:] |= reached[:-1] & v_ok
+        grown[:-1] |= reached[1:] & v_ok
+        if np.array_equal(grown, reached):
+            break
+        reached = grown
+        if step % 16 == 0:
+            cols, rows = np.nonzero(reached.any(axis=0))[0], np.nonzero(reached.any(axis=1))[0]
+            if cols[-1] - cols[0] + 1 > BUTTON_MAX_W or rows[-1] - rows[0] + 1 > BUTTON_MAX_H:
+                return None
+    return reached
+
+
+def button_bounds(image: Image.Image, x: int, y: int) -> tuple[int, int, int, int] | None:
+    """Rectangle (x, y, w, h) of the button under the point, found by its face color; None if unclear.
+
+    The face is grown from a seed pixel through neighbors whose color steps stay small (vertical gradients
+    pass, borders and text edges stop it), so text inside the button is skipped and a neighbor button
+    separated by a gap or a border is never reached. Faces smaller than BUTTON_MIN_* or larger than
+    BUTTON_MAX_* (page backgrounds, banners) are not buttons.
+    """
+    left, top = max(0, x - BUTTON_MAX_W), max(0, y - BUTTON_MAX_H)
+    right, bottom = min(image.width, x + BUTTON_MAX_W + 1), min(image.height, y + BUTTON_MAX_H + 1)
+    window = np.asarray(image.convert("RGB").crop((left, top, right, bottom)), dtype=np.int16)
+    tried = np.zeros(window.shape[:2], dtype=bool)
+    attempts = 0
+    for sx, sy in _face_seeds(window, x - left, y - top):
+        if tried[sy, sx]:
+            continue
+        if attempts == BUTTON_MAX_SEEDS:
+            break
+        attempts += 1
+        reached = _grow_face(window, sx, sy)
+        if reached is None:
+            return None  # the face color is the page background: not a button
+        cols, rows = np.nonzero(reached.any(axis=0))[0], np.nonzero(reached.any(axis=1))[0]
+        width, height = int(cols[-1] - cols[0] + 1), int(rows[-1] - rows[0] + 1)
+        if BUTTON_MIN_W <= width <= BUTTON_MAX_W and BUTTON_MIN_H <= height <= BUTTON_MAX_H:
+            return left + int(cols[0]), top + int(rows[0]), width, height
+        tried |= reached  # trapped inside a letter: try a seed outside it
+    return None
+
+
+def _contains(rect: tuple[int, int, int, int], x: int, y: int) -> bool:
+    return rect[0] <= x < rect[0] + rect[2] and rect[1] <= y < rect[1] + rect[3]
+
+
+def _pad(rect: tuple[int, int, int, int], pad: int) -> tuple[int, int, int, int]:
+    x, y, w, h = rect
+    left, top = max(0, x - pad), max(0, y - pad)
+    return left, top, min(SCREEN_W, x + w + pad) - left, min(SCREEN_H, y + h + pad) - top
+
+
+def _word_count(text: str) -> int:
+    return len(re.findall(r"\w+", text))
+
+
+def is_success_text(text: str) -> bool:
+    """A short notice such as "Cambios aplicados" or "Cliente CL-0007 guardado"."""
+    return _word_count(text) <= MAX_NOTICE_WORDS and bool(SUCCESS_NOTICE_RE.search(_fold(text)))
+
+
+def new_heading_code(texts: Sequence[str], before: Sequence[TextBox]) -> str | None:
+    """A record code that appeared in a short changed text (a title like "Cliente CL-0141")."""
+    known = {code for box in before for code in assigned_codes(box.text)}
+    for text in texts:
+        if _word_count(text) > MAX_HEADING_WORDS:
+            continue
+        fresh = sorted(assigned_codes(text) - known)
+        if fresh:
+            return fresh[0]
+    return None
+
+
 def evidence_regions(regions: Sequence[tuple[int, int, int, int]]) -> list[tuple[int, int, int, int]]:
     """Changed regions worth reading after a commit: not huge, largest first, padded and clamped."""
     small = [r for r in regions if r[2] * r[3] <= MAX_EVIDENCE_AREA]
@@ -235,6 +382,32 @@ def evidence_regions(regions: Sequence[tuple[int, int, int, int]]) -> list[tuple
         bottom = min(SCREEN_H, y + h + EVIDENCE_PAD_PX)
         padded.append((left, top, right - left, bottom - top))
     return padded
+
+
+def _fold(text: str) -> str:
+    decomposed = unicodedata.normalize("NFKD", text)
+    return "".join(ch for ch in decomposed if not unicodedata.combining(ch)).lower()
+
+
+def _inside(box: TextBox, region: tuple[int, int, int, int]) -> bool:
+    cx, cy = box.center
+    x, y, w, h = region
+    return x - EVIDENCE_PAD_PX <= cx < x + w + EVIDENCE_PAD_PX and y - EVIDENCE_PAD_PX <= cy < y + h + EVIDENCE_PAD_PX
+
+
+def new_success_notices(
+    before: Sequence[TextBox], after: Sequence[TextBox], regions: Sequence[tuple[int, int, int, int]]
+) -> list[str]:
+    """Success-message texts that were not on screen before and lie inside a changed region."""
+    seen = {_fold(box.text).strip() for box in before}
+    notices: list[str] = []
+    for box in sorted(after, key=lambda b: (b.y, b.x)):
+        folded = _fold(box.text).strip()
+        if folded in seen or not SUCCESS_NOTICE_RE.search(folded):
+            continue
+        if any(_inside(box, region) for region in regions) and box.text not in notices:
+            notices.append(box.text[:MAX_EVIDENCE_CHARS])
+    return notices
 
 
 def image_block(image: Image.Image) -> dict[str, Any]:
@@ -342,6 +515,8 @@ class ToolBox:
         self._image: Image.Image | None = None
         self._boxes: list[TextBox] = []
         self._commit_evidence: list[CommitEvidence] = []
+        self._last_target: tuple[int, int, int, int] | None = None
+        self._outcome_targets: list[tuple[int, int, int, int]] = []
         self.steps: list[str] = []
         self._step = 0
         self._handlers: dict[str, Callable[[dict[str, Any]], Awaitable[ToolOutcome]]] = {
@@ -418,10 +593,25 @@ class ToolBox:
         image, changed = await self._settler.settle(since)
         return await self._observation(image, note, changed), changed
 
-    async def _observation(self, image: Image.Image, note: str, changed: bool | None = None) -> ToolOutcome:
-        previous = self._image
-        regions = await asyncio.to_thread(screen_regions, previous, image) if previous is not None else []
-        boxes = await self._reader.read(image)
+    async def _observation(
+        self,
+        image: Image.Image,
+        note: str,
+        changed: bool | None = None,
+        evidence_taken: bool = False,
+        regions: list[tuple[int, int, int, int]] | None = None,
+        boxes: list[TextBox] | None = None,
+    ) -> ToolOutcome:
+        """Observation text for the model; `regions`/`boxes` may be passed when already computed."""
+        if regions is None:
+            previous = self._image
+            regions = await asyncio.to_thread(screen_regions, previous, image) if previous is not None else []
+        if boxes is None:
+            boxes = await self._reader.read(image)
+        if not evidence_taken:
+            notices = new_success_notices(self._boxes, boxes, regions)
+            if notices:
+                self._commit_evidence.append(CommitEvidence(label=NOTICE_LABEL, texts=tuple(notices), image=image))
         self.prime(image, boxes)
         if changed is None:
             changed = bool(regions)
@@ -453,24 +643,48 @@ class ToolBox:
         return " | ".join(box.text for box in sorted(boxes, key=lambda b: b.x)) or "(vacío o ilegible)"
 
     async def _target_boxes(self, x: int, y: int) -> Sequence[TextBox]:
-        """Boxes the guard judges a click with: a crop around the point, else the full-screen OCR."""
+        """Boxes the guard judges a click with: the clicked button only, else a narrow crop, else full OCR."""
+        self._last_target = None
         if self._image is None:
             return self._boxes
+        rect = await asyncio.to_thread(button_bounds, self._image, x, y)
+        self._last_target = rect
+        if rect is not None:
+            region = _pad(rect, BUTTON_PAD_PX)
+            boxes = await self._reader.read(self._image, region)
+            text = " ".join(b.text.strip() for b in sorted(boxes, key=lambda b: (b.y, b.x)) if b.text.strip())
+            if text:
+                return [TextBox(text=text, x=region[0], y=region[1], w=region[2], h=region[3])]
         crop = await self._reader.read(self._image, guard_crop(x, y))
         if crop and label_at(x, y, crop):
             return crop
         return self._boxes
 
-    async def _collect_evidence(self, label: str, image: Image.Image) -> str:
-        """Read the regions a commit changed (toasts vanish quickly) and keep the screenshot."""
-        previous = self._image
-        regions = await asyncio.to_thread(screen_regions, previous, image) if previous is not None else []
+    def _visible_codes(self) -> set[str]:
+        return {code for box in self._boxes for code in assigned_codes(box.text)}
+
+    async def _read_regions(self, image: Image.Image, regions: Sequence[tuple[int, int, int, int]]) -> list[str]:
         texts: list[str] = []
-        for region in evidence_regions(regions):
+        for region in regions:
             boxes = await self._reader.read(image, region)
             text = " ".join(box.text for box in sorted(boxes, key=lambda b: (b.y, b.x))).strip()
             if text and text not in texts:
                 texts.append(text[:MAX_EVIDENCE_CHARS])
+        return texts
+
+    def _outcome_regions(
+        self, regions: Sequence[tuple[int, int, int, int]], x: int, y: int
+    ) -> list[tuple[int, int, int, int]]:
+        """Small changed regions worth reading after a non-commit click; the clicked button itself is skipped."""
+        picked = [
+            r for r in regions
+            if MIN_OUTCOME_W <= r[2] and MIN_OUTCOME_H <= r[3] and r[2] * r[3] <= MAX_OUTCOME_AREA
+            and not (r[0] <= x < r[0] + r[2] and r[1] <= y < r[1] + r[3] and r[2] <= BUTTON_MAX_W)
+        ]
+        picked.sort(key=lambda r: r[2] * r[3], reverse=True)
+        return evidence_regions(picked[:MAX_OUTCOME_REGIONS])
+
+    def _keep_evidence(self, label: str, texts: Sequence[str], image: Image.Image) -> str:
         self._commit_evidence.append(CommitEvidence(label=label, texts=tuple(texts), image=image))
         return f"\nMensajes tras confirmar: {' | '.join(texts)}" if texts else ""
 
@@ -492,28 +706,83 @@ class ToolBox:
         if button not in ("left", "right", "middle"):
             raise ToolInputError("'button' debe ser left, right o middle")
         double = _bool(args, "double", False)
-        verdict = self._guard.check_click(x, y, await self._target_boxes(x, y))
+        verdict = self._guard.check_click(x, y, await self._target_boxes(x, y), visible_codes=self._visible_codes())
+        half = OUTCOME_TARGET_HALF
+        button_area = self._last_target or (x - half, y - half, 2 * half, 2 * half)
+        if not verdict.is_commit and any(_contains(r, x, y) for r in self._outcome_targets):
+            # Same button that saved before although its label is unreadable: apply the commit limits.
+            verdict = self._guard.check_commit(NOTICE_LABEL, self._visible_codes())
         if not verdict.allowed:
             return self._blocked(verdict.reason)
+        before_boxes = list(self._boxes)
         since = self._clock()
         await self._screen.click(x, y, button, double)
         if verdict.label:
             self._record_step(f"click '{verdict.label}'")
         target = f" sobre '{verdict.label}'" if verdict.label else ""
         note = f"Clic en ({x},{y}){target}."
-        image, changed = await self._settler.settle(since)
         if verdict.is_commit:
-            self._guard.record_commit(verdict.label, changed)
-            note += " Acción de confirmación registrada." if changed else " La confirmación no cambió la pantalla."
-            if changed:
-                note += await self._collect_evidence(verdict.label, image)
+            image, changed = await self._settler.settle(since, **COMMIT_SETTLE)
+        else:
+            image, changed = await self._settler.settle(since)
+        previous = self._image
+        regions = await asyncio.to_thread(screen_regions, previous, image) if previous is not None else []
+        navigation = sum(w * h for _, _, w, h in regions) >= NAVIGATION_AREA
+        may_have_saved = not verdict.dismissal and not words(verdict.label) & NO_OUTCOME_WORDS
+        if verdict.is_commit:
+            texts = await self._read_regions(image, evidence_regions(regions))
+        elif may_have_saved:
+            texts = await self._read_regions(image, self._outcome_regions(regions, x, y))
+        else:
+            texts = []
+        boxes = await self._reader.read(image)
+        notices = [t for t in texts if is_success_text(t)]
+        notices += [n for n in new_success_notices(before_boxes, boxes, regions) if n not in notices]
+        code = new_heading_code(texts, before_boxes)
+        evidence_taken = False
+        if verdict.is_commit and verdict.weak and navigation and not notices and code is None:
+            # "Crear"/"Nuevo" that just replaced the screen opened a form; it saved nothing.
+            self._guard.note_navigation()
+            note += " Se abrió otra pantalla; no cuenta como confirmación."
+        elif verdict.is_commit:
+            self._guard.record_commit(verdict.label)
+            note += " Acción de confirmación registrada."
+            if not regions:
+                note += (
+                    " La pantalla aún no cambió: no repitas la acción; usa wait o zoom y revisa el título "
+                    "(código asignado) o el mensaje de éxito."
+                )
+            evidence_taken = bool(regions)
+            if evidence_taken:
+                note += self._keep_evidence(verdict.label, texts, image)
+        elif (notices or code) and may_have_saved and not navigation:
+            # The guard did not recognize the button (garbled OCR) but the app reported a save.
+            self._guard.record_commit(NOTICE_LABEL)
+            log.info("confirmación detectada por el resultado del clic en (%d,%d)", x, y)
+            note += (
+                " La aplicación mostró un aviso de guardado: se registró como acción de confirmación. "
+                "No la repitas."
+            )
+            note += self._keep_evidence(NOTICE_LABEL, notices or texts, image)
+            evidence_taken = True
+            self._outcome_targets.append(button_area)
         else:
             self._guard.mark_verified()
-        return await self._observation(image, note, changed)
+            if navigation:
+                self._guard.note_navigation()
+        if code is not None and evidence_taken:
+            self._guard.note_saved_code(code)
+        return await self._observation(
+            image, note, changed, evidence_taken=evidence_taken, regions=regions, boxes=boxes
+        )
+
+    async def trace_event(self, note: str) -> None:
+        """Trace step for something the agent noticed without acting (e.g. an interface change)."""
+        await self._save_trace(ToolCall(id="evento", name="evento", input={}), ToolOutcome(text=note))
 
     async def _check_field(self, x: int, y: int) -> None:
         verdict = self._guard.check_click(x, y, await self._target_boxes(x, y))
-        if verdict.is_commit:
+        if verdict.is_commit or words(verdict.label) & COMMIT_WORDS:
             raise ToolInputError(
                 f"({x},{y}) está sobre '{verdict.label}', un botón de confirmación; no es un campo de texto"
             )
