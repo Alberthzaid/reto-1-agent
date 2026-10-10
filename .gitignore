@@ -1,0 +1,46 @@
+# Environment and secrets
+.env
+.env.*
+!.env.example
+
+# Python virtual environments and build artifacts
+.venv/
+venv/
+env/
+ENV/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+build/
+dist/
+*.egg-info/
+
+# Test, type-checking, and coverage caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.pyre/
+.hypothesis/
+.tox/
+.nox/
+.coverage
+.coverage.*
+htmlcov/
+
+# IDE and editor files
+.idea/
+*.iml
+.vscode/
+
+# Operating-system files
+.DS_Store
+Thumbs.db
+
+# Generated runtime artifacts
+capturas_prueba/
+data/
+model_s1/
+*.log
+.atl/
+.codegraph/

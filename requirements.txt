@@ -1,0 +1,22 @@
+# API
+fastapi>=0.143.0
+uvicorn[standard]>=0.54.0
+pydantic>=2.0
+python-dotenv
+
+# VNC (cliente RFB propio)
+websockets>=17.2
+pycryptodome>=3.24.0
+
+# Imagen y OCR (Tesseract se instala aparte, no es un paquete de pip)
+numpy>=2.5.3
+pillow>=12.3.0
+pytesseract>=0.3.13
+
+# LLM y HTTP
+anthropic>=1.13.0
+httpx
+
+# Pruebas
+pytest
+pytest-asyncio

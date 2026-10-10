@@ -1,0 +1,29 @@
+schema: spec-driven
+
+context: |
+  Tech stack: Python 3.13 (code stays 3.10+ syntax-compatible), uv, FastAPI, websockets, pycryptodome, numpy, pillow, pytesseract, python-dotenv, anthropic.
+  Architecture: hexagonal modular monolith under agent/ (domain, ports, infra, application, api, observability); dev_tools/; tests/.
+  Testing: pytest + pytest-asyncio (explicit @pytest.mark.asyncio; no pyproject pytest config). Tests never hit the real desktop.
+  Style: type hints everywhere, logging (never print), secrets never logged; identifiers/comments in English, user-facing strings in Spanish.
+
+rules:
+  proposal:
+    - Include rollback plan for risky changes
+    - Flag forecasts above the review budget
+  specs:
+    - Use Given/When/Then for scenarios
+    - Use RFC 2119 keywords (MUST, SHALL, SHOULD, MAY)
+  design:
+    - Document architecture decisions with rationale
+  tasks:
+    - Group by phase, use hierarchical numbering
+    - Keep tasks completable in one session
+  apply:
+    tdd: true
+    test_command: "uv run pytest"
+  verify:
+    test_command: "uv run pytest"
+    build_command: ""
+    coverage_threshold: 0
+  archive:
+    - Warn before merging destructive deltas
