@@ -52,6 +52,6 @@ Typed, immutable, env-driven settings that never expose secrets.
 `repr`/`str` of Settings MUST NOT contain ANTHROPIC_API_KEY, TEAM_TOKEN or the desktop password.
 
 #### Scenario: Repr masks secrets
-- GIVEN api key "k-123", team token "t-456", desktop password "s3cret"
+- GIVEN api key "k-123", team token "t-456", desktop password "redaction-fixture-value"
 - WHEN `repr(settings)` and `str(settings)` are taken
-- THEN neither contains "k-123", "t-456" or "s3cret"
+- THEN neither contains "k-123", "t-456" or "redaction-fixture-value"
