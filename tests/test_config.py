@@ -13,7 +13,7 @@ def test_defaults_with_only_secrets() -> None:
     assert s.data_dir == "data"
     assert s.tesseract_cmd is None
     assert s.falco_enabled is False
-    assert s.falco_model_dir == "model_s1"
+    assert s.falco_base_url == "http://127.0.0.1:8000"
     assert s.max_concurrent_tasks == 8
     assert s.desktop_url is None and s.desktop_password is None
 
@@ -33,6 +33,12 @@ def test_overrides_parse_types() -> None:
     assert s.max_concurrent_tasks == 2
     assert s.tesseract_cmd == "/usr/bin/tesseract"
     assert s.log_level == "DEBUG"
+
+
+def test_falco_base_url_can_be_overridden() -> None:
+    assert Settings.from_env({"FALCO_BASE_URL": "http://falco.example.test:9000"}).falco_base_url == (
+        "http://falco.example.test:9000"
+    )
 
 
 @pytest.mark.parametrize("raw,expected", [("1", True), ("YES", True), ("false", False), ("0", False), ("", False)])
@@ -78,3 +84,28 @@ def test_require_desktop_names_variable_only(env: dict[str, str], missing: str) 
         s.require_desktop()
     assert missing in str(exc.value)
     assert "pw" not in str(exc.value).lower().replace("desktop_password", "")
+
+
+def test_base_url_defaults_to_none() -> None:
+    assert Settings.from_env({}).anthropic_base_url is None
+
+
+def test_openrouter_base_url_maps_default_models_to_openrouter_ids() -> None:
+    s = Settings.from_env({"ANTHROPIC_BASE_URL": "https://openrouter.ai/api"})
+    assert s.anthropic_base_url == "https://openrouter.ai/api"
+    assert s.model_fast == "anthropic/claude-sonnet-5.5"
+    assert s.model_strong == "anthropic/claude-opus-5.5"
+
+
+def test_explicit_models_win_over_openrouter_defaults() -> None:
+    s = Settings.from_env(
+        {"ANTHROPIC_BASE_URL": "https://openrouter.ai/api", "MODEL_FAST": "anthropic/claude-haiku-5.5"}
+    )
+    assert s.model_fast == "anthropic/claude-haiku-5.5"
+    assert s.model_strong == "anthropic/claude-opus-5.5"
+
+
+@pytest.mark.parametrize(("raw", "expected"), [(None, False), ("1", True), ("0", False), ("true", True)])
+def test_ui_enabled_flag(raw: str | None, expected: bool) -> None:
+    env = {} if raw is None else {"UI_ENABLED": raw}
+    assert Settings.from_env(env).ui_enabled is expected

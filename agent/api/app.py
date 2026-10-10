@@ -1,6 +1,7 @@
 """FastAPI application factory for task submission and status retrieval."""
 
 from contextlib import asynccontextmanager
+from collections.abc import Callable, Sequence
 from typing import AsyncIterator
 
 from fastapi import Depends, FastAPI, HTTPException, status
@@ -10,15 +11,26 @@ from agent.api.schemas import EstadoTarea, TareaCreada, TareaIn
 from agent.application.manager import TaskManager
 
 
-def create_app(manager: TaskManager, team_token: str | None) -> FastAPI:
+def create_app(
+    manager: TaskManager,
+    team_token: str | None,
+    startup_services: Sequence[Callable[[], object]] = (),
+    shutdown_services: Sequence[Callable[[], object]] = (),
+) -> FastAPI:
     """Create the HTTP application around an already configured manager."""
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         await manager.start()
+        for service in startup_services:
+            service()
         try:
             yield
         finally:
+            for service in shutdown_services:
+                result = service()
+                if hasattr(result, "__await__"):
+                    await result  # type: ignore[misc]
             await manager.stop()
 
     auth = team_auth(team_token)

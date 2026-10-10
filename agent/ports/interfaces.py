@@ -1,5 +1,6 @@
 """Async port Protocols. The domain depends only on these."""
 
+from collections.abc import Sequence
 from typing import Any, Protocol, runtime_checkable
 
 from PIL import Image
@@ -52,9 +53,13 @@ class Memory(Protocol):
 
     async def save_procedure(self, app: str, procedure: Procedure) -> None: ...
 
+    async def penalize(self, app: str, intent: str, procedures: Sequence[Procedure]) -> None: ...
+
     async def save_task(self, task: Task) -> None: ...
 
     async def load_task(self, task_id: str) -> Task | None: ...
+
+    async def list_tasks(self, limit: int = 50) -> list[Task]: ...
 
     async def mark_stale_running_as_failed(self) -> int: ...
 
