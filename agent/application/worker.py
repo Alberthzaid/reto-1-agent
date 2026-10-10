@@ -28,6 +28,12 @@ FIRST_FRAME_TIMEOUT_S = 30.0
 FIRST_FRAME_POLL_S = 0.2
 HARD_MARGIN_S = 5.0  # stop before the task manager's own timeout
 VERIFY_RESERVE_S = 30.0  # time kept for the final verification call
+QUESTION_KINDS: frozenset[str] = frozenset({"consultar", "pregunta", "question"})
+
+
+def is_question(plan: Plan) -> bool:
+    """Read-only task that asks for a value instead of changing data."""
+    return plan.kind.strip().casefold() in QUESTION_KINDS
 
 
 @runtime_checkable
@@ -157,6 +163,16 @@ class AgentWorker:
         if result.estado is not TaskStatus.terminada:
             await self._penalize(app, intent, hints)
             return result
+        if is_question(plan) and not self._guard.commits:
+            # A read-only answer leaves nothing to verify on screen; a fresh screenshot of a paginated
+            # list cannot confirm a total, so the verifier would only reject a correct answer.
+            if result.respuesta:
+                await self._remember(app, intent, plan, toolbox.steps, result, orientation.version)
+                return result
+            await self._penalize(app, intent, hints)
+            return replace(
+                result, estado=TaskStatus.fallida, resumen=f"{result.resumen} No se obtuvo la respuesta.".strip()
+            )
         final_image, final_boxes = await toolbox.observe()
         claim = "; ".join(filter(None, [result.resumen, "respuesta: " + "; ".join(result.respuesta)
                                         if result.respuesta else ""]))

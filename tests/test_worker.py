@@ -505,3 +505,65 @@ async def test_same_version_procedures_are_still_hints(tmp_path: Path) -> None:
     worker, _, fast_model, _ = build(HAPPY_FAST, [CONFIRM], reader=FakeReader(boxes), memory=memory)
     await worker.run()
     assert "Hints from previous tasks" in str(fast_model.requests[1]["messages"][0]["content"])
+
+
+QUESTION_PLAN: dict[str, Any] = {
+    **PLAN_INPUT, "kind": "consultar", "values": [], "planned_commits": 0,
+    "expected_evidence": "Total de facturas vencidas",
+}
+
+
+@pytest.mark.asyncio
+async def test_question_with_answer_and_no_commits_skips_the_verifier() -> None:
+    fast = [
+        tool_decision(("submit_plan", QUESTION_PLAN)),
+        tool_decision(("finish", {"estado": "terminada", "resumen": "Suma de facturas vencidas.",
+                                  "respuesta": ["45"]})),
+    ]
+    worker, _, _, strong = build(fast, [])
+    status, summary = await worker.run()
+    assert status is TaskStatus.terminada
+    assert "45" in summary
+    assert strong.requests == []
+
+
+@pytest.mark.asyncio
+async def test_question_without_answer_fails() -> None:
+    fast = [
+        tool_decision(("submit_plan", QUESTION_PLAN)),
+        tool_decision(("finish", {"estado": "terminada", "resumen": "Revisé las facturas."})),
+    ]
+    worker, _, _, strong = build(fast, [])
+    status, _ = await worker.run()
+    assert status is TaskStatus.fallida
+    assert strong.requests == []
+
+
+@pytest.mark.asyncio
+async def test_question_that_committed_is_still_verified() -> None:
+    fast = [
+        tool_decision(("submit_plan", {**QUESTION_PLAN, "planned_commits": 1})),
+        tool_decision(("click", {"x": 640, "y": 710})),
+        tool_decision(("finish", {"estado": "terminada", "resumen": "Listo.", "respuesta": ["45"]})),
+    ]
+    worker, _, _, strong = build(
+        fast, [tool_decision(("verdict", {"confirmed": False, "evidence": "No se ve"}))]
+    )
+    status, summary = await worker.run()
+    assert "Guardar" in summary  # the commit was recorded
+    assert status is TaskStatus.fallida
+    assert len(strong.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_write_task_with_answer_is_still_verified() -> None:
+    fast = [
+        tool_decision(("submit_plan", PLAN_INPUT)),
+        tool_decision(("finish", {"estado": "terminada", "resumen": "Cliente creado.", "respuesta": ["x"]})),
+    ]
+    worker, _, _, strong = build(
+        fast, [tool_decision(("verdict", {"confirmed": True, "evidence": "Se ve"}))]
+    )
+    status, _ = await worker.run()
+    assert status is TaskStatus.terminada
+    assert len(strong.requests) == 1

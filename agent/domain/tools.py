@@ -48,6 +48,22 @@ BUTTON_SEED_HALF_H = 3
 BUTTON_SEED_SIMILAR = 12
 BUTTON_MAX_SEEDS = 6
 BUTTON_PAD_PX = 2
+# Rereading a typed field: only the input box under the point (a horizontal strip read the neighbor
+# input on the same row: NIT reread as "901234567 (31570"), after its delayed rendering settles.
+FIELD_MAX_W = 960  # v4.2 "Razón social" spans the form (~873 px)
+FIELD_MAX_H = 60
+FIELD_STRIP_HALF_W = 160
+FIELD_STRIP_HALF_H = 8  # band checked for vertical borders; taller than glyph stems, shorter than inputs
+FIELD_STRIP_H = 32
+FIELD_POLL_S = 0.1
+FIELD_QUIET_S = 0.4
+FIELD_MAX_WAIT_S = 2.0
+EMPTY_FIELD = "(vacío o ilegible)"
+FIELD_MATCH = "coincide con lo escrito"
+REREAD_HINT = (
+    "Si un campo no coincide, puede ser un error de OCR: usa zoom sobre ese campo antes de reescribirlo. "
+    "Para reescribirlo usa type_into con replace=true (replace=false añade el texto al final)."
+)
 GUARD_CROP_W = 100
 GUARD_CROP_H = 28
 # Commits repaint slowly (title and toast after ~1.5 s), so their observation waits longer.
@@ -101,7 +117,8 @@ TOOL_SPECS: list[dict[str, Any]] = [
     {
         "name": "type_into",
         "description": "Click a text field, select its current content (when replace is true) and type text. "
-        "The field is read back afterwards.",
+        "The field is read back afterwards and compared with the text. replace=false appends to the current "
+        "content and is refused when the field already holds the text.",
         "strict": True,
         "input_schema": {
             "type": "object",
@@ -286,14 +303,16 @@ def _face_seeds(window: np.ndarray, px: int, py: int) -> list[tuple[int, int]]:
     ]
 
 
-def _grow_face(window: np.ndarray, sx: int, sy: int) -> np.ndarray | None:
-    """Pixels connected to the seed through small color steps; None when it outgrows a button."""
+def _grow_face(
+    window: np.ndarray, sx: int, sy: int, max_w: int = BUTTON_MAX_W, max_h: int = BUTTON_MAX_H
+) -> np.ndarray | None:
+    """Pixels connected to the seed through small color steps; None when it outgrows max_w x max_h."""
     face = np.max(np.abs(window - window[sy, sx]), axis=2) <= BUTTON_SEED_TOL
     h_ok = (np.max(np.abs(window[:, 1:] - window[:, :-1]), axis=2) <= BUTTON_STEP_TOL) & face[:, 1:] & face[:, :-1]
     v_ok = (np.max(np.abs(window[1:] - window[:-1]), axis=2) <= BUTTON_STEP_TOL) & face[1:] & face[:-1]
     reached = np.zeros(face.shape, dtype=bool)
     reached[sy, sx] = True
-    for step in range(2 * (BUTTON_MAX_W + BUTTON_MAX_H)):
+    for step in range(2 * (max_w + max_h)):
         grown = reached.copy()
         grown[:, 1:] |= reached[:, :-1] & h_ok
         grown[:, :-1] |= reached[:, 1:] & h_ok
@@ -304,7 +323,7 @@ def _grow_face(window: np.ndarray, sx: int, sy: int) -> np.ndarray | None:
         reached = grown
         if step % 16 == 0:
             cols, rows = np.nonzero(reached.any(axis=0))[0], np.nonzero(reached.any(axis=1))[0]
-            if cols[-1] - cols[0] + 1 > BUTTON_MAX_W or rows[-1] - rows[0] + 1 > BUTTON_MAX_H:
+            if cols[-1] - cols[0] + 1 > max_w or rows[-1] - rows[0] + 1 > max_h:
                 return None
     return reached
 
@@ -337,6 +356,65 @@ def button_bounds(image: Image.Image, x: int, y: int) -> tuple[int, int, int, in
             return left + int(cols[0]), top + int(rows[0]), width, height
         tried |= reached  # trapped inside a letter: try a seed outside it
     return None
+
+
+def _field_face(image: Image.Image, x: int, y: int) -> tuple[int, int, int, int] | None:
+    """Rectangle of the input box under the point: its face grown up to its border; None if unclear."""
+    left, top = max(0, x - FIELD_MAX_W), max(0, y - FIELD_MAX_H)
+    right, bottom = min(image.width, x + FIELD_MAX_W + 1), min(image.height, y + FIELD_MAX_H + 1)
+    window = np.asarray(image.convert("RGB").crop((left, top, right, bottom)), dtype=np.int16)
+    tried = np.zeros(window.shape[:2], dtype=bool)
+    attempts = 0
+    for sx, sy in _face_seeds(window, x - left, y - top):
+        if tried[sy, sx]:
+            continue
+        if attempts == BUTTON_MAX_SEEDS:
+            break
+        attempts += 1
+        reached = _grow_face(window, sx, sy, FIELD_MAX_W, FIELD_MAX_H)
+        if reached is None:
+            return None  # no closed box around the point (page background)
+        cols, rows = np.nonzero(reached.any(axis=0))[0], np.nonzero(reached.any(axis=1))[0]
+        width, height = int(cols[-1] - cols[0] + 1), int(rows[-1] - rows[0] + 1)
+        if BUTTON_MIN_W <= width <= FIELD_MAX_W and BUTTON_MIN_H <= height <= FIELD_MAX_H:
+            return left + int(cols[0]), top + int(rows[0]), width, height
+        tried |= reached  # trapped inside a letter: try a seed outside it
+    return None
+
+
+def _field_strip(image: Image.Image, x: int, y: int) -> tuple[int, int, int, int]:
+    """Fallback reread area: a strip at most FIELD_STRIP_HALF_W to each side, cut at the nearest
+    vertical border (a column that differs from the background over the whole band around y)."""
+    top, bottom = max(0, y - FIELD_STRIP_HALF_H), min(image.height, y + FIELD_STRIP_HALF_H + 1)
+    left, right = max(0, x - FIELD_STRIP_HALF_W), min(image.width, x + FIELD_STRIP_HALF_W + 1)
+    band = np.asarray(image.convert("RGB").crop((left, top, right, bottom)), dtype=np.int16)
+    background = np.median(band.reshape(-1, 3), axis=0)
+    border = (np.max(np.abs(band - background), axis=2) >= DIFF_THRESHOLD).all(axis=0)
+    px = x - left
+    walls_left = np.nonzero(border[:px])[0]
+    walls_right = np.nonzero(border[px + 1:])[0]
+    start = left + int(walls_left[-1]) + 1 if walls_left.size else left
+    end = left + px + 1 + int(walls_right[0]) if walls_right.size else right
+    strip_top = max(0, y - FIELD_STRIP_H // 2)
+    return start, strip_top, end - start, min(FIELD_STRIP_H, image.height - strip_top)
+
+
+def field_region(image: Image.Image, x: int, y: int) -> tuple[int, int, int, int]:
+    """Area to OCR when rereading the text field under the point: the input box itself when it can be
+    delimited (so a neighbor input on the same row is never read), else a narrow strip."""
+    rect = _field_face(image, x, y)
+    if rect is not None and _contains(rect, x, y):
+        return _pad(rect, BUTTON_PAD_PX)
+    return _field_strip(image, x, y)
+
+
+def _comparable(text: str) -> str:
+    """Text reduced for comparing a reread with what was typed: no case, accents, spaces or punctuation."""
+    return re.sub(r"[\W_]+", "", _fold(text).casefold())
+
+
+def same_text(read: str, intended: str) -> bool:
+    return bool(_comparable(intended)) and _comparable(read) == _comparable(intended)
 
 
 def _contains(rect: tuple[int, int, int, int], x: int, y: int) -> bool:
@@ -634,13 +712,49 @@ class ToolBox:
         done = f" ({', '.join(commits)})" if commits else ""
         return f"{time_part}. Confirmaciones hechas: {len(commits)} de {self._guard.planned_commits}{done}."
 
-    async def _read_field(self, image: Image.Image, x: int, y: int) -> str:
-        left = max(0, x - 320)
-        top = max(0, y - 16)
-        width = min(640, SCREEN_W - left)
-        height = min(32, SCREEN_H - top)
-        boxes = await self._reader.read(image, (left, top, width, height))
-        return " | ".join(box.text for box in sorted(boxes, key=lambda b: b.x)) or "(vacío o ilegible)"
+    async def _field_regions(self, points: Sequence[tuple[int, int]]) -> list[tuple[int, int, int, int]]:
+        """Input box under each point, delimited on the screen as it was before typing."""
+        image = self._image or await self._screen.screenshot()
+        return [await asyncio.to_thread(field_region, image, x, y) for x, y in points]
+
+    async def _read_field(self, image: Image.Image, region: tuple[int, int, int, int]) -> str:
+        boxes = await self._reader.read(image, region)
+        text = " ".join(b.text.strip() for b in sorted(boxes, key=lambda b: (b.y, b.x)) if b.text.strip())
+        return text or EMPTY_FIELD
+
+    async def _await_fields(
+        self, image: Image.Image, regions: Sequence[tuple[int, int, int, int]], before: Image.Image | None
+    ) -> Image.Image:
+        """Latest screenshot once the typed fields stop changing (v4.2 renders typed text late).
+
+        Fields still identical to the screen before typing have not rendered yet, so they keep the wait
+        going; the wait ends after FIELD_QUIET_S without changes or after FIELD_MAX_WAIT_S in total.
+        """
+
+        def crops(img: Image.Image) -> list[bytes]:
+            return [img.crop((x, y, x + w, y + h)).tobytes() for x, y, w, h in regions]
+
+        original = crops(before) if before is not None and before.size == image.size else None
+        current = crops(image)
+        start = stable_since = self._clock()
+        while self._clock() - start + FIELD_POLL_S <= FIELD_MAX_WAIT_S + 1e-9:
+            rendered = original is None or all(c != o for c, o in zip(current, original))
+            if rendered and self._clock() - stable_since >= FIELD_QUIET_S:
+                break
+            await self._sleep(FIELD_POLL_S)
+            latest = await self._screen.screenshot()
+            fresh = crops(latest) if latest.size == image.size else current
+            if fresh != current:
+                stable_since = self._clock()
+                current = fresh
+            image = latest
+        return image
+
+    @staticmethod
+    def _reread_note(read_back: str, intended: str) -> str:
+        if same_text(read_back, intended):
+            return f"'{read_back}' ({FIELD_MATCH})"
+        return f"'{read_back}' (no coincide con lo escrito '{intended}'; puede ser un error de OCR)"
 
     async def _target_boxes(self, x: int, y: int) -> Sequence[TextBox]:
         """Boxes the guard judges a click with: the clicked button only, else a narrow crop, else full OCR."""
@@ -792,13 +906,25 @@ class ToolBox:
         text = _text(args, "text")
         replace = _bool(args, "replace", True)
         await self._check_field(x, y)
+        (region,) = await self._field_regions([(x, y)])
+        before = self._image
+        if not replace and before is not None and same_text(await self._read_field(before, region), text):
+            # Appending would duplicate the value ("90123456712..." in a real run).
+            return self._blocked(
+                f"El campo en ({x},{y}) ya contiene '{text}'; no se escribió para no duplicarlo. "
+                "Si dudas del valor usa zoom sobre el campo; para reescribirlo usa replace=true."
+            )
         since = self._clock()
         await self._fill(x, y, text, replace)
         self._record_step("type into a field")
         self._guard.note_data_entry()
         image, changed = await self._settler.settle(since)
-        read_back = await self._read_field(image, x, y)
-        return await self._observation(image, f"Escribí en ({x},{y}). Campo releído: '{read_back}'.", changed)
+        image = await self._await_fields(image, [region], before)
+        read_back = await self._read_field(image, region)
+        note = f"Escribí en ({x},{y}). Campo releído: {self._reread_note(read_back, text)}."
+        if not same_text(read_back, text):
+            note += "\n" + REREAD_HINT
+        return await self._observation(image, note, changed)
 
     async def _fill(self, x: int, y: int, text: str, replace: bool) -> None:
         await self._screen.click(x, y)
@@ -818,15 +944,23 @@ class ToolBox:
             parsed.append((x, y, _text(field, "value")))
         for x, y, _ in parsed:
             await self._check_field(x, y)
+        regions = await self._field_regions([(x, y) for x, y, _ in parsed])
+        before = self._image
         since = self._clock()
         for x, y, value in parsed:
             await self._fill(x, y, value, True)
         self._record_step(f"fill form ({len(parsed)} fields)")
         self._guard.note_data_entry()
         image, changed = await self._settler.settle(since)
+        image = await self._await_fields(image, regions, before)
         lines = ["Formulario llenado. Campos releídos:"]
-        for x, y, _ in parsed:
-            lines.append(f"- ({x},{y}): '{await self._read_field(image, x, y)}'")
+        mismatch = False
+        for (x, y, value), region in zip(parsed, regions):
+            read_back = await self._read_field(image, region)
+            mismatch |= not same_text(read_back, value)
+            lines.append(f"- ({x},{y}): {self._reread_note(read_back, value)}")
+        if mismatch:
+            lines.append(REREAD_HINT)
         return await self._observation(image, "\n".join(lines), changed)
 
     async def _key(self, args: dict[str, Any]) -> ToolOutcome:
