@@ -18,3 +18,4 @@ How to work:
 - Before calling `finish` with `terminada`, leave the evidence visible on screen (the saved record, the updated field, the answer) and confirm it with your own eyes in the last screenshot.
 - Write `resumen` in Spanish, 1-3 short sentences. Never include passwords, tokens or URLs.
 - Hints from previous tasks are only suggestions: confirm each menu or button on screen before following them. In `finish.aprendizaje` describe only navigation (menus, buttons, order of steps), never customer data (names, ids, values).
+- If the task says a replay from memory stopped at some step ("Repetición desde memoria detenida"), continue from the current screen: check which fields and commits are already done and never repeat a commit that is already registered.

@@ -38,7 +38,7 @@ def build(tmp_path: Path) -> tuple[FastAPI, PanelContext]:
 
 def test_ui_not_mounted_when_disabled(tmp_path: Path) -> None:
     app, context = build(tmp_path)
-    assert mount_ui(app, context, enabled=False, team_token=TEAM_TOKEN) is False
+    assert mount_ui(app, context, enabled=False, password=TEAM_TOKEN) is False
     with TestClient(app) as client:
         assert client.get("/ui").status_code == 404
         assert client.get("/ui/").status_code == 404
@@ -47,14 +47,14 @@ def test_ui_not_mounted_when_disabled(tmp_path: Path) -> None:
 def test_ui_refuses_to_mount_without_team_token(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
     app, context = build(tmp_path)
     with caplog.at_level(logging.WARNING):
-        assert mount_ui(app, context, enabled=True, team_token=None) is False
+        assert mount_ui(app, context, enabled=True, password=None) is False
     assert "TEAM_TOKEN" in caplog.text
 
 
 def test_ui_mounted_requires_login(tmp_path: Path) -> None:
     pytest.importorskip("gradio")
     app, context = build(tmp_path)
-    assert mount_ui(app, context, enabled=True, team_token=TEAM_TOKEN) is True
+    assert mount_ui(app, context, enabled=True, password=TEAM_TOKEN) is True
     with TestClient(app) as client:
         page = client.get("/ui/", follow_redirects=True)
         assert page.status_code == 200
@@ -68,6 +68,20 @@ def test_ui_mounted_requires_login(tmp_path: Path) -> None:
         assert config.status_code == 200
         labels = {c.get("props", {}).get("label") for c in config.json()["components"]}
         assert {"Ejecutar", "Tareas", "Registros", "Configuración", "Pruebas", "Memoria"} <= labels
+        assert "Éxitos mínimos para repetir desde memoria" in labels
+        assert client.get("/health", headers={"Authorization": f"Bearer {TEAM_TOKEN}"}).status_code == 200
+
+
+def test_ui_login_uses_its_own_password_and_api_keeps_team_token(tmp_path: Path) -> None:
+    pytest.importorskip("gradio")
+    app, context = build(tmp_path)
+    assert mount_ui(app, context, enabled=True, password="admin") is True
+    with TestClient(app) as client:
+        assert client.post("/ui/login", data={"username": LOGIN_USER, "password": TEAM_TOKEN}).status_code in {400, 401}
+        assert client.post("/ui/login", data={"username": LOGIN_USER, "password": "admin"}).status_code == 200
+        assert client.get("/ui/config").status_code == 200
+        # The easy panel password never opens the API.
+        assert client.get("/health", headers={"Authorization": "Bearer admin"}).status_code == 401
         assert client.get("/health", headers={"Authorization": f"Bearer {TEAM_TOKEN}"}).status_code == 200
 
 
@@ -82,7 +96,7 @@ def test_event_file_urls_keep_the_mount_path_behind_a_proxy(tmp_path: Path) -> N
     from starlette.requests import Request
 
     app, context = build(tmp_path)
-    mount_ui(app, context, enabled=True, team_token=TEAM_TOKEN)
+    mount_ui(app, context, enabled=True, password=TEAM_TOKEN)
     gradio_app = next(route.app for route in app.routes if getattr(route, "path", None) == "/ui")
     request = Request({
         "type": "http", "method": "POST", "scheme": "http", "server": ("agent", 8000),

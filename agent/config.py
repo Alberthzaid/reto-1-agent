@@ -5,7 +5,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass, fields
 
 _TRUE_VALUES = frozenset({"1", "true", "yes", "on"})
-_SECRET_FIELDS = frozenset({"anthropic_api_key", "team_token", "desktop_password"})
+_SECRET_FIELDS = frozenset({"anthropic_api_key", "team_token", "desktop_password", "ui_password"})
 
 
 class ConfigError(Exception):
@@ -58,6 +58,7 @@ class Settings:
     desktop_password: str | None = None
     log_level: str = "INFO"
     ui_enabled: bool = False
+    ui_password: str | None = None
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "Settings":
@@ -82,7 +83,13 @@ class Settings:
             desktop_password=_optional(source, "DESKTOP_PASSWORD"),
             log_level=source.get("LOG_LEVEL") or cls.log_level,
             ui_enabled=_parse_bool(source, "UI_ENABLED", cls.ui_enabled),
+            ui_password=_optional(source, "UI_PASSWORD"),
         )
+
+    @property
+    def panel_password(self) -> str | None:
+        """Login password for the /ui panel: UI_PASSWORD, else TEAM_TOKEN. The API always uses TEAM_TOKEN."""
+        return self.ui_password or self.team_token
 
     def require_desktop(self) -> tuple[str, str]:
         """Return (url, password) or raise ConfigError naming the missing variable."""

@@ -14,7 +14,7 @@ from agent.observability import log_setup
 from PIL import Image
 
 from tests.fakes import (
-    FakeClock, FakeModel, FakeReader, FakeScreen, FakeSettler, FakeTrace, RoutedModel, overlaps,
+    FakeClock, FakeModel, FakeReader, FakeScreen, FakeSettler, FakeTrace, RoutedModel, TypingReader, overlaps,
     tool_decision,
 )
 
@@ -449,7 +449,9 @@ async def test_second_task_uses_hints_and_needs_fewer_turns(tmp_path: Path) -> N
     first, _, _, _ = build([], [CONFIRM], reader=reader, memory=memory, fast_model=first_model)
     assert (await first.run())[0] is TaskStatus.terminada
     second_model = RoutedModel(_hint_aware_route)
-    second, _, _, _ = build([], [CONFIRM], reader=reader, memory=memory, fast_model=second_model)
+    # Replay from memory is disabled here so the hint path itself is exercised.
+    second, _, _, _ = build([], [CONFIRM], reader=reader, memory=memory, fast_model=second_model,
+                            replay_min_successes=99)
     assert (await second.run())[0] is TaskStatus.terminada
     intro = str(second_model.requests[1]["messages"][0]["content"])
     assert "Hints from previous tasks" in intro and "click 'Clientes'" in intro and "click 'Guardar'" in intro
@@ -591,3 +593,137 @@ async def test_max_turns_limits_the_execution_loop() -> None:
     status, _ = await worker.run()
     assert status is TaskStatus.fallida
     assert strong.requests == []
+
+
+# --- replay from memory ------------------------------------------------------------------------------
+
+NIT_LABEL = TextBox(text="NIT *", x=240, y=270, w=40, h=14)
+NOMBRE_LABEL = TextBox(text="Nombre *", x=240, y=330, w=60, h=14)
+FORM_BOXES = [HOY, CLIENTES, NIT_LABEL, NOMBRE_LABEL, GUARDAR]
+FORM_PLAN: dict[str, Any] = {
+    **PLAN_INPUT,
+    "values": [{"field": "nombre", "value": "Papelería Los Andes"}, {"field": "nit", "value": "901234567"}],
+}
+FILL = ("fill_form", {"fields": [{"x": 400, "y": 300, "value": "901234567"},
+                                 {"x": 400, "y": 360, "value": "Papelería Los Andes"}]})
+LEARN_FAST = [
+    tool_decision(("submit_plan", FORM_PLAN)),
+    tool_decision(FILL),
+    tool_decision(("click", {"x": 640, "y": 710})),
+    tool_decision(("finish", {"estado": "terminada", "resumen": "Cliente creado.",
+                              "aprendizaje": "Llenar NIT y Nombre y pulsar Guardar."})),
+]
+
+
+def build_form(fast: list[Any], strong: list[Any], memory: Any, boxes: list[TextBox] | None = None,
+               **extra: Any) -> tuple[AgentWorker, FakeScreen, FakeModel, FakeModel]:
+    screen = FakeScreen()
+    reader = TypingReader(screen, list(boxes or FORM_BOXES))
+    return build(fast, strong, screen=screen, reader=reader, memory=memory, **extra)
+
+
+def trace_notes(trace: FakeTrace) -> str:
+    return " ".join(step[2] for step in trace.steps)
+
+
+@pytest.mark.asyncio
+async def test_second_run_replays_the_learned_script_without_model_turns(tmp_path: Path) -> None:
+    memory = SqliteMemory(tmp_path / "agent.db")
+    first, _, first_fast, _ = build_form(LEARN_FAST, [CONFIRM], memory)
+    assert (await first.run())[0] is TaskStatus.terminada
+    app = memory.fingerprint(FORM_BOXES)
+    [learned] = await memory.procedures(app, INTENT)
+    assert [(s.kind, s.field) for s in learned.script] == [("fill", "nit"), ("fill", "nombre"), ("click", "")]
+    assert "901234567" not in repr(learned) and "Papeler" not in repr(learned)
+
+    trace = FakeTrace()
+    second, screen, second_fast, strong = build_form(
+        [tool_decision(("submit_plan", FORM_PLAN))], [CONFIRM], memory, trace=trace
+    )
+    status, summary = await second.run()
+    assert status is TaskStatus.terminada
+    assert len(second_fast.requests) == 1 < len(first_fast.requests)  # only PLAN asked the model
+    assert len(strong.requests) == 1  # VERIFY still runs
+    typed = [a[1] for a in screen.actions if a[0] == "type_text"]
+    assert typed == ["901234567", "Papelería Los Andes"]
+    assert [a for a in screen.actions if a[:3] == ("click", 640, 710)] == [("click", 640, 710, "left", False)]
+    assert "modo memoria: 3 pasos reproducidos" in trace_notes(trace)
+    assert "Guardar" in summary and "memoria" not in summary.lower()
+    [after] = await memory.procedures(app, INTENT)
+    assert (after.exitos, after.fallos_replay) == (2, 0)
+
+
+@pytest.mark.asyncio
+async def test_stopped_replay_hands_over_to_the_model_with_a_note(tmp_path: Path) -> None:
+    memory = SqliteMemory(tmp_path / "agent.db")
+    app = memory.fingerprint(FORM_BOXES)
+    from agent.domain.models import ScriptStep
+
+    script = (
+        ScriptStep(kind="fill", field_label="NIT *", field="nit", dx=140, dy=23),
+        ScriptStep(kind="fill", field_label="Nombre *", field="nombre", dx=140, dy=23),
+        ScriptStep(kind="click", anchor="Grabar", x=900, y=500, commit=True),  # no longer on screen
+    )
+    await memory.save_procedure(app, Procedure(app, INTENT, ("fill form (2 fields)", "click 'Grabar'"),
+                                               script=script))
+    trace = FakeTrace()
+    fast = [
+        tool_decision(("submit_plan", FORM_PLAN)),
+        tool_decision(("click", {"x": 640, "y": 710})),
+        tool_decision(("finish", {"estado": "terminada", "resumen": "Cliente creado."})),
+    ]
+    worker, screen, fast_model, _ = build_form(fast, [CONFIRM], memory, trace=trace)
+    status, _ = await worker.run()
+    assert status is TaskStatus.terminada
+    intro = str(fast_model.requests[1]["messages"][0]["content"])
+    assert "Repetición desde memoria detenida en el paso 3" in intro and "Grabar" in intro
+    assert "no repitas confirmaciones ya registradas" in intro
+    assert "Hints from previous tasks" in intro
+    assert [a[1] for a in screen.actions if a[0] == "type_text"] == ["901234567", "Papelería Los Andes"]
+    assert "repetición detenida en 3" in trace_notes(trace)
+    stale = [p for p in await memory.list_procedures() if "click 'Grabar'" in p.steps]
+    assert stale[0].fallos_replay == 1 and stale[0].exitos == 0
+
+
+@pytest.mark.asyncio
+async def test_script_with_a_field_the_plan_lacks_is_not_replayed(tmp_path: Path) -> None:
+    memory = SqliteMemory(tmp_path / "agent.db")
+    app = memory.fingerprint(FORM_BOXES)
+    from agent.domain.models import ScriptStep
+
+    script = (ScriptStep(kind="fill", field_label="Teléfono", field="telefono", dx=140, dy=23),
+              ScriptStep(kind="click", anchor="Guardar", x=640, y=710, commit=True))
+    await memory.save_procedure(app, Procedure(app, INTENT, ("click 'Guardar'",), script=script))
+    worker, screen, fast_model, _ = build_form(LEARN_FAST, [CONFIRM], memory)
+    assert (await worker.run())[0] is TaskStatus.terminada
+    assert len(fast_model.requests) == len(LEARN_FAST)
+    assert "Repetición desde memoria" not in str(fast_model.requests[1]["messages"][0]["content"])
+
+
+@pytest.mark.asyncio
+async def test_replay_rejected_by_the_verifier_counts_a_replay_failure(tmp_path: Path) -> None:
+    memory = SqliteMemory(tmp_path / "agent.db")
+    first, _, _, _ = build_form(LEARN_FAST, [CONFIRM], memory)
+    assert (await first.run())[0] is TaskStatus.terminada
+    second, _, _, _ = build_form([tool_decision(("submit_plan", FORM_PLAN))], [REJECT], memory)
+    assert (await second.run())[0] is TaskStatus.fallida
+    [stored] = await memory.list_procedures()
+    assert (stored.exitos, stored.fallos_replay) == (0, 1)
+
+
+@pytest.mark.asyncio
+async def test_app_is_keyed_by_header_name_even_when_a_modal_hides_it_from_full_screen_ocr(tmp_path: Path) -> None:
+    title = TextBox(text="SIGECOM - Distribuidora Andina v4.2 Hoy: 14/10/2026", x=8, y=11, w=700, h=14)
+
+    def header_only(_img: Any, region: tuple[int, int, int, int]) -> list[TextBox]:
+        if region[:2] == (0, 0) and region[3] <= 80:
+            return [title]
+        x, y, w, h = region
+        return [b for b in (GUARDAR,) if x <= b.center[0] < x + w and y <= b.center[1] < y + h]
+
+    memory = SqliteMemory(tmp_path / "agent.db")
+    reader = FakeReader([HOY, GUARDAR], region_fn=header_only)  # full-screen OCR misses the app name
+    worker, _, _, _ = build(HAPPY_FAST, [CONFIRM], memory=memory, reader=reader)
+    status, _ = await worker.run()
+    assert status is TaskStatus.terminada
+    assert [p.exitos for p in await memory.procedures("sigecom", INTENT)] == [1]

@@ -1,0 +1,78 @@
+# https://taskfile.dev — run `task up` to start the whole project locally.
+version: "3"
+
+vars:
+  AGENT_PORT: 8000
+  FALCO_PORT: 8100 # Falco also defaults to 8000; keep them apart
+  FALCO_DIR: ../falco
+
+tasks:
+  default:
+    cmds:
+      - task --list
+    silent: true
+
+  up:
+    desc: Start Falco and the agent API together (Ctrl+C stops both)
+    # Falco is optional: if it fails to start, the agent keeps running without classification hints.
+    deps: [falco, agent]
+
+  install:
+    desc: Install dependencies for the agent and Falco
+    deps: [install:agent, install:falco]
+
+  install:agent:
+    internal: true
+    cmds:
+      - uv sync
+
+  install:falco:
+    internal: true
+    dir: "{{.FALCO_DIR}}"
+    preconditions:
+      - sh: test -d "{{.FALCO_DIR}}"
+        msg: "Falco not found at {{.FALCO_DIR}}; set FALCO_DIR=... or run the agent alone with `task agent`"
+    cmds:
+      - uv sync
+
+  agent:
+    desc: Start the agent API on 127.0.0.1:{{.AGENT_PORT}} (reads .env; Falco hints via {{.FALCO_PORT}})
+    env:
+      FALCO_ENABLED: "true"
+      FALCO_BASE_URL: "http://127.0.0.1:{{.FALCO_PORT}}"
+    cmds:
+      # `python -m uvicorn`, not the uvicorn.exe shim: Windows Application Control may block the shim.
+      - uv run python -m uvicorn agent.main:app --host 127.0.0.1 --port {{.AGENT_PORT}} --workers 1
+
+  falco:
+    desc: Start the Falco classifier service on 127.0.0.1:{{.FALCO_PORT}}
+    dir: "{{.FALCO_DIR}}"
+    preconditions:
+      - sh: test -d "{{.FALCO_DIR}}"
+        msg: "Falco not found at {{.FALCO_DIR}}; set FALCO_DIR=... or run the agent alone with `task agent`"
+      - sh: test -d model_s1
+        msg: "Falco has no trained model (model_s1); run its train.py first"
+    cmds:
+      - uv run python -m uvicorn main:app --host 127.0.0.1 --port {{.FALCO_PORT}}
+
+  test:
+    desc: Run the agent test suite (extra pytest args after --)
+    cmds:
+      - uv run pytest {{.CLI_ARGS}}
+
+  harness:
+    desc: Run the practice tests against the local agent, e.g. `task harness -- --only E1`
+    env:
+      AGENT_URL: "http://127.0.0.1:{{.AGENT_PORT}}"
+    cmds:
+      - uv run python -m dev_tools.run_tests {{.CLI_ARGS}}
+
+  docker:up:
+    desc: Build and start the production stack (agent + Caddy) with docker compose
+    cmds:
+      - docker compose up -d --build
+
+  docker:down:
+    desc: Stop the docker compose stack
+    cmds:
+      - docker compose down

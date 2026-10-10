@@ -61,6 +61,7 @@ def build_worker_factory(
             classifier=classifier if values.falco_enabled else None,
             memory=memory,
             max_turns=values.max_turns,
+            replay_min_successes=values.replay_min_successes,
             prompts_dir=values.prompts_dir,
         )
 

@@ -22,7 +22,7 @@ log = logging.getLogger(__name__)
 load_dotenv()
 settings = Settings.from_env()
 setup_logging(settings.log_level)
-for _secret in (settings.anthropic_api_key, settings.team_token, settings.desktop_password):
+for _secret in (settings.anthropic_api_key, settings.team_token, settings.desktop_password, settings.ui_password):
     register_secret(_secret)
 
 runtime = RuntimeConfig.from_settings(settings, BLOCKED_COMBOS)
@@ -52,5 +52,5 @@ mount_ui(
         procedures=memory,
     ),
     enabled=settings.ui_enabled,
-    team_token=settings.team_token,
+    password=settings.panel_password,
 )

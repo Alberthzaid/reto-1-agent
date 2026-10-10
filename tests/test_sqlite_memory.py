@@ -186,3 +186,81 @@ def test_has_procedures_table_false_on_legacy_db(tmp_path: Path) -> None:
     with sqlite3.connect(tmp_path / "legacy.db") as connection:
         connection.execute("DROP TABLE procedures")
     assert memory.has_procedures_table() is False
+
+
+# --- replayable scripts ------------------------------------------------------------------------------
+
+from agent.domain.models import ScriptStep  # noqa: E402
+
+SCRIPT = (
+    ScriptStep(kind="click", anchor="Clientes", x=130, y=110),
+    ScriptStep(kind="fill", field_label="NIT *", field="nit", dx=140, dy=23),
+    ScriptStep(kind="click", anchor="Guardar", x=640, y=710, commit=True),
+)
+
+
+@pytest.mark.asyncio
+async def test_script_round_trips(memory: SqliteMemory) -> None:
+    await memory.save_procedure(APP, Procedure(APP, INTENT, ("click 'Guardar'",), script=SCRIPT, app_version="4.2"))
+    [stored] = await memory.procedures(APP, INTENT)
+    assert stored.script == SCRIPT
+    assert stored.fallos_replay == 0
+    [listed] = await memory.list_procedures()
+    assert listed.script == SCRIPT
+
+
+@pytest.mark.asyncio
+async def test_new_recording_replaces_the_script(memory: SqliteMemory) -> None:
+    steps = ("click 'Guardar'",)
+    await memory.save_procedure(APP, Procedure(APP, INTENT, steps, script=SCRIPT))
+    moved = (SCRIPT[0], SCRIPT[1], ScriptStep(kind="click", anchor="Guardar", x=900, y=500, commit=True))
+    await memory.save_procedure(APP, Procedure(APP, INTENT, steps, script=moved))
+    [stored] = await memory.procedures(APP, INTENT)
+    assert (stored.script, stored.exitos) == (moved, 2)
+
+
+@pytest.mark.asyncio
+async def test_replay_failures_are_counted_and_a_success_resets_them(memory: SqliteMemory) -> None:
+    procedure = Procedure(APP, INTENT, ("click 'Guardar'",), script=SCRIPT)
+    await memory.save_procedure(APP, procedure)
+    await memory.record_replay(APP, INTENT, procedure, success=False)
+    await memory.record_replay(APP, INTENT, procedure, success=False)
+    [stored] = await memory.procedures(APP, INTENT)
+    assert stored.fallos_replay == 2
+    assert stored.script == SCRIPT  # still offered as a hint
+    # Saving the same script again (the LLM finished the task) does not erase the failures...
+    await memory.save_procedure(APP, procedure)
+    assert (await memory.procedures(APP, INTENT))[0].fallos_replay == 2
+    # ...a successful replay does.
+    await memory.record_replay(APP, INTENT, procedure, success=True)
+    assert (await memory.procedures(APP, INTENT))[0].fallos_replay == 0
+
+
+@pytest.mark.asyncio
+async def test_script_labels_with_data_are_not_stored(memory: SqliteMemory) -> None:
+    leaky = (*SCRIPT, ScriptStep(kind="click", anchor="Fila 12345"))
+    await memory.save_procedure(APP, Procedure(APP, INTENT, ("click 'Guardar'",), script=leaky))
+    [stored] = await memory.procedures(APP, INTENT)
+    assert stored.script == ()
+
+
+@pytest.mark.asyncio
+async def test_database_without_script_columns_is_migrated(tmp_path: Path) -> None:
+    db = tmp_path / "agent.db"
+    with sqlite3.connect(db) as connection:
+        connection.execute(
+            "CREATE TABLE procedures (app TEXT NOT NULL, intent TEXT NOT NULL, steps TEXT NOT NULL, "
+            "aprendizaje TEXT NOT NULL, exitos INTEGER NOT NULL, updated_at TEXT NOT NULL, app_version TEXT, "
+            "PRIMARY KEY (app, intent, steps))"
+        )
+        connection.execute(
+            "INSERT INTO procedures VALUES (?, ?, ?, ?, ?, ?, ?)",
+            (APP, INTENT, '["click \'Guardar\'"]', "", 2, "2026-10-01T00:00:00+00:00", "4.2"),
+        )
+    memory = SqliteMemory(db)
+    SqliteMemory(db)  # opening twice must not fail
+    [legacy] = await memory.procedures(APP, INTENT)
+    assert (legacy.script, legacy.fallos_replay, legacy.exitos) == ((), 0, 2)
+    await memory.save_procedure(APP, Procedure(APP, INTENT, ("click 'Guardar'",), script=SCRIPT, app_version="4.2"))
+    [updated] = await memory.procedures(APP, INTENT)
+    assert (updated.script, updated.exitos) == (SCRIPT, 3)
