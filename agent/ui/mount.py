@@ -22,6 +22,7 @@ def mount_ui(app: FastAPI, context: PanelContext, *, enabled: bool, team_token: 
     import gradio as gr
 
     from agent.ui.panel import build_panel
+    from agent.ui.theme import BRAND_CSS, brand_theme
 
     traces_dir = (context.data_dir / "traces").resolve()
     traces_dir.mkdir(parents=True, exist_ok=True)
@@ -35,7 +36,8 @@ def mount_ui(app: FastAPI, context: PanelContext, *, enabled: bool, team_token: 
         show_error=False,
         ssr_mode=False,
         mcp_server=False,
-        theme=gr.themes.Soft(),
+        theme=brand_theme(),
+        css=BRAND_CSS,
     )
     log.info("panel de control montado en %s", UI_PATH)
     return True
