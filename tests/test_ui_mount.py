@@ -83,3 +83,26 @@ def test_ui_login_uses_its_own_password_and_api_keeps_team_token(tmp_path: Path)
         # The easy panel password never opens the API.
         assert client.get("/health", headers={"Authorization": "Bearer admin"}).status_code == 401
         assert client.get("/health", headers={"Authorization": f"Bearer {TEAM_TOKEN}"}).status_code == 200
+
+
+
+def test_event_file_urls_keep_the_mount_path_behind_a_proxy(tmp_path: Path) -> None:
+    """Event outputs (gallery screenshots) resolve their URL from the Gradio app's root_path only.
+
+    Behind Caddy (X-Forwarded-Host) an empty root_path drops /ui and every screenshot 404s.
+    """
+    pytest.importorskip("gradio")
+    from gradio import route_utils
+    from starlette.requests import Request
+
+    app, context = build(tmp_path)
+    mount_ui(app, context, enabled=True, password=TEAM_TOKEN)
+    gradio_app = next(route.app for route in app.routes if getattr(route, "path", None) == "/ui")
+    request = Request({
+        "type": "http", "method": "POST", "scheme": "http", "server": ("agent", 8000),
+        "path": "/ui/gradio_api/queue/join", "root_path": "", "query_string": b"",
+        "headers": [(b"host", b"agent:8000"), (b"x-forwarded-host", b"agent.example.com"),
+                    (b"x-forwarded-proto", b"https")],
+    })
+    root = route_utils.get_root_url(request, route_path="/gradio_api/queue/join", root_path=gradio_app.root_path)
+    assert root == "https://agent.example.com/ui"
