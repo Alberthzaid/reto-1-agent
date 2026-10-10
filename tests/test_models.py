@@ -15,15 +15,20 @@ from agent.domain.models import (
     Commit,
     Decision,
     Observation,
+    Plan,
     Procedure,
     Task,
+    TaskResult,
     TaskStatus,
     TextBox,
+    ToolCall,
 )
 from agent.ports.interfaces import Classifier, Memory, Model, Reader, Screen
 
 ROOT = Path(__file__).resolve().parent.parent
-ALL_MODELS = [Task, Observation, Action, Commit, Procedure, Decision, Classification, TextBox]
+ALL_MODELS = [
+    Task, Observation, Action, Commit, Procedure, Decision, Classification, TextBox, ToolCall, Plan, TaskResult,
+]
 
 
 def test_text_box_center() -> None:
@@ -77,6 +82,32 @@ def test_text_box_field_names() -> None:
     assert TextBox(text="a", x=0, y=0, w=1, h=1, conf=0.5).conf == 0.5
 
 
+def test_decision_carries_tool_calls_text_and_raw_blocks() -> None:
+    call = ToolCall(id="toolu_1", name="click", input={"x": 1, "y": 2})
+    decision = Decision(tool_calls=(call,), text="ok", stop_reason="tool_use", raw=({"type": "text", "text": "ok"},))
+    assert decision.tool_calls[0].input == {"x": 1, "y": 2}
+    assert decision.stop_reason == "tool_use"
+    assert decision.raw[0]["type"] == "text"
+    assert Decision().tool_calls == () and Decision().raw == () and Decision().text == ""
+
+
+def test_plan_defaults_and_fields() -> None:
+    plan = Plan(kind="crear")
+    assert [f.name for f in dataclasses.fields(Plan)] == [
+        "kind", "entity", "target", "values", "preconditions", "planned_commits", "feasible", "reason",
+        "expected_evidence",
+    ]
+    assert plan.feasible is True and plan.planned_commits == 0 and plan.values == ()
+
+
+def test_task_result_fields() -> None:
+    result = TaskResult(estado=TaskStatus.fallida, resumen="x", datos_razon=("52345678",))
+    assert [f.name for f in dataclasses.fields(TaskResult)] == [
+        "estado", "resumen", "respuesta", "datos_razon", "commits", "aprendizaje",
+    ]
+    assert result.respuesta == () and result.commits == ()
+
+
 @pytest.mark.parametrize("module", [models, inspect.getmodule(Screen)])
 def test_domain_and_ports_do_not_import_outer_layers(module: object) -> None:
     tree = ast.parse(Path(inspect.getsourcefile(module)).read_text(encoding="utf-8"))  # type: ignore[arg-type]
@@ -86,6 +117,17 @@ def test_domain_and_ports_do_not_import_outer_layers(module: object) -> None:
             assert not any(node.module.startswith(f) for f in forbidden)
         if isinstance(node, ast.Import):
             assert not any(a.name.startswith(f) for a in node.names for f in forbidden)
+
+
+@pytest.mark.parametrize("path", sorted((ROOT / "agent" / "domain").glob("*.py")), ids=lambda p: p.name)
+def test_every_domain_module_stays_inside_the_hexagon(path: Path) -> None:
+    tree = ast.parse(path.read_text(encoding="utf-8"))
+    forbidden = ("agent.infra", "agent.api", "agent.application", "anthropic")
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            assert not node.module.startswith(forbidden), f"{path.name} imports {node.module}"
+        if isinstance(node, ast.Import):
+            assert not any(a.name.startswith(forbidden) for a in node.names), f"{path.name} imports outer layer"
 
 
 def test_screen_signature() -> None:

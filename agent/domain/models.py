@@ -68,10 +68,52 @@ class Procedure:
 
 
 @dataclass(frozen=True, slots=True)
+class ToolCall:
+    """One tool invocation requested by the model."""
+
+    id: str
+    name: str
+    input: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass(frozen=True, slots=True)
 class Decision:
+    """A model turn. `raw` holds the assistant content blocks to append back verbatim."""
+
     actions: tuple[Action, ...] = ()
     reasoning: str = ""
     done: bool = False
+    tool_calls: tuple[ToolCall, ...] = ()
+    text: str = ""
+    stop_reason: str = ""
+    raw: tuple[Any, ...] = ()
+
+
+@dataclass(frozen=True, slots=True)
+class Plan:
+    """What the task asks for, decided before touching the screen."""
+
+    kind: str
+    entity: str = ""
+    target: str = ""
+    values: tuple[tuple[str, str], ...] = ()
+    preconditions: tuple[str, ...] = ()
+    planned_commits: int = 0
+    feasible: bool = True
+    reason: str = ""
+    expected_evidence: str = ""
+
+
+@dataclass(frozen=True, slots=True)
+class TaskResult:
+    """Outcome of the agent loop before it is turned into the public summary."""
+
+    estado: TaskStatus
+    resumen: str = ""
+    respuesta: tuple[str, ...] = ()
+    datos_razon: tuple[str, ...] = ()
+    commits: tuple[str, ...] = ()
+    aprendizaje: str = ""
 
 
 @dataclass(frozen=True, slots=True)
