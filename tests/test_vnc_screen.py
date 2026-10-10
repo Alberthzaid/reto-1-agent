@@ -5,7 +5,11 @@ import asyncio
 import pytest
 from PIL import Image
 
+from websockets.protocol import State
+
+import agent.infra.vnc.vnc_screen as vnc_screen_module
 from agent.infra.vnc.keys import BlockedKeyError, keysym
+from agent.infra.vnc.rfb import RFBConnectionError, RFBError
 from agent.infra.vnc.vnc_screen import VncScreen
 from agent.ports.interfaces import Screen
 from dev_tools.mock_vnc_server import MockVncServer
@@ -219,5 +223,94 @@ async def test_out_of_bounds_coordinates_raise_value_error(x: int, y: int) -> No
 
 @pytest.mark.asyncio
 async def test_screenshot_before_connect_raises() -> None:
-    with pytest.raises(Exception):
+    with pytest.raises(RFBError):
         await VncScreen().screenshot()
+
+
+@pytest.mark.asyncio
+async def test_type_text_gap_is_15_to_20_ms(monkeypatch: pytest.MonkeyPatch) -> None:
+    async with MockVncServer(PASSWORD) as server:
+        screen = await open_screen(server)
+        try:
+            real_sleep = asyncio.sleep
+            delays: list[float] = []
+
+            async def recording_sleep(delay: float) -> None:
+                delays.append(delay)
+                await real_sleep(0)
+
+            class FakeAsyncio:
+                sleep = staticmethod(recording_sleep)
+
+            monkeypatch.setattr(vnc_screen_module, "asyncio", FakeAsyncio)
+            await screen.type_text("abc")
+            assert len(delays) == 6  # one gap after every key-down and every key-up
+            assert all(0.015 <= d <= 0.020 for d in delays)
+        finally:
+            monkeypatch.undo()
+            await screen.close()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("op", ["click", "type_text", "key", "scroll", "screenshot"])
+async def test_connection_error_mid_session_closes_client(op: str) -> None:
+    async with MockVncServer(PASSWORD) as server:
+        screen = await open_screen(server)
+        client = screen._client
+        assert client is not None and client._ws is not None and client._task is not None
+        ws, task = client._ws, client._task
+        await server.disconnect_clients()
+        await asyncio.wait_for(asyncio.gather(task, return_exceptions=True), 5)  # reader died
+        calls = {
+            "click": lambda: screen.click(10, 10),
+            "type_text": lambda: screen.type_text("a"),
+            "key": lambda: screen.key("ctrl+a"),
+            "scroll": lambda: screen.scroll(10, 10, 1),
+            "screenshot": lambda: screen.screenshot(),
+        }
+        with pytest.raises(RFBConnectionError):
+            await calls[op]()
+        assert screen._client is None
+        assert ws.state is State.CLOSED
+        assert task.done()
+        with pytest.raises(RFBError):  # later calls report "not connected"
+            await screen.screenshot()
+
+
+@pytest.mark.asyncio
+async def test_error_halfway_through_typing_closes_client(monkeypatch: pytest.MonkeyPatch) -> None:
+    async with MockVncServer(PASSWORD) as server:
+        screen = await open_screen(server)
+        client = screen._client
+        assert client is not None and client._ws is not None
+        ws = client._ws
+        real_key = client.key
+        sent = 0
+
+        async def flaky_key(sym: int, down: bool) -> None:
+            nonlocal sent
+            sent += 1
+            if sent == 3:
+                raise RFBConnectionError("lost")
+            await real_key(sym, down)
+
+        monkeypatch.setattr(client, "key", flaky_key)
+        with pytest.raises(RFBConnectionError):
+            await screen.type_text("abc")
+        assert screen._client is None
+        assert ws.state is State.CLOSED
+
+
+@pytest.mark.asyncio
+async def test_value_error_does_not_close_client() -> None:
+    async with MockVncServer(PASSWORD) as server:
+        screen = await open_screen(server)
+        try:
+            with pytest.raises(ValueError):
+                await screen.click(-1, -1)
+            with pytest.raises(BlockedKeyError):
+                await screen.key("ctrl+w")
+            assert screen._client is not None
+            assert (await screen.screenshot()).size == (1280, 800)
+        finally:
+            await screen.close()

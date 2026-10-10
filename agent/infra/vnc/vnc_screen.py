@@ -2,6 +2,8 @@
 
 import asyncio
 import logging
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 from PIL import Image
 
@@ -39,12 +41,23 @@ class VncScreen:
             raise RFBError("la pantalla VNC no está conectada")
         return self._client
 
+    @asynccontextmanager
+    async def _closing_on_failure(self) -> AsyncIterator[RFBClient]:
+        """Yield the client; close it if a connection/protocol error escapes the operation."""
+        client = self._require()
+        try:
+            yield client
+        except RFBError:
+            await self.close()
+            raise
+
     def _check_bounds(self, client: RFBClient, x: int, y: int) -> None:
         if not (0 <= x < client.width and 0 <= y < client.height):
             raise ValueError(f"coordenadas fuera de pantalla: ({x}, {y})")
 
     async def screenshot(self) -> Image.Image:
-        fb = await self._require().snapshot()
+        async with self._closing_on_failure() as client:
+            fb = await client.snapshot()
         return Image.fromarray(bgrx_to_rgb(fb), "RGB")
 
     async def click(self, x: int, y: int, button: str = "left", double: bool = False) -> None:
@@ -53,34 +66,37 @@ class VncScreen:
         mask = BUTTON_MASKS.get(button)
         if mask is None:
             raise ValueError(f"botón desconocido: {button!r}")
-        await client.pointer(x, y, 0)
-        await asyncio.sleep(MOVE_SETTLE_S)
-        for i in range(2 if double else 1):
-            if i:
-                await asyncio.sleep(DOUBLE_CLICK_GAP_S)
-            await client.pointer(x, y, mask)
-            await asyncio.sleep(CLICK_HOLD_S)
+        async with self._closing_on_failure():
             await client.pointer(x, y, 0)
+            await asyncio.sleep(MOVE_SETTLE_S)
+            for i in range(2 if double else 1):
+                if i:
+                    await asyncio.sleep(DOUBLE_CLICK_GAP_S)
+                await client.pointer(x, y, mask)
+                await asyncio.sleep(CLICK_HOLD_S)
+                await client.pointer(x, y, 0)
         log.debug("clic %s en (%d, %d)%s", button, x, y, " doble" if double else "")
 
     async def type_text(self, text: str) -> None:
         client = self._require()
-        for char in text:
-            sym = keysym(char)
-            await client.key(sym, True)
-            await asyncio.sleep(KEY_INTERVAL_S)
-            await client.key(sym, False)
-            await asyncio.sleep(KEY_INTERVAL_S)
+        async with self._closing_on_failure():
+            for char in text:
+                sym = keysym(char)
+                await client.key(sym, True)
+                await asyncio.sleep(KEY_INTERVAL_S)
+                await client.key(sym, False)
+                await asyncio.sleep(KEY_INTERVAL_S)
 
     async def key(self, combo: str) -> None:
         client = self._require()
         syms = parse_combo(combo)  # raises BlockedKeyError before anything is sent
-        for sym in syms:
-            await client.key(sym, True)
-            await asyncio.sleep(KEY_INTERVAL_S)
-        for sym in reversed(syms):
-            await client.key(sym, False)
-            await asyncio.sleep(KEY_INTERVAL_S)
+        async with self._closing_on_failure():
+            for sym in syms:
+                await client.key(sym, True)
+                await asyncio.sleep(KEY_INTERVAL_S)
+            for sym in reversed(syms):
+                await client.key(sym, False)
+                await asyncio.sleep(KEY_INTERVAL_S)
 
     async def scroll(self, x: int, y: int, steps: int) -> None:
         client = self._require()
@@ -88,13 +104,14 @@ class VncScreen:
         if steps == 0:
             return
         mask = SCROLL_UP_MASK if steps > 0 else SCROLL_DOWN_MASK
-        await client.pointer(x, y, 0)
-        await asyncio.sleep(MOVE_SETTLE_S)
-        for _ in range(abs(steps)):
-            await client.pointer(x, y, mask)
-            await asyncio.sleep(SCROLL_STEP_S)
+        async with self._closing_on_failure():
             await client.pointer(x, y, 0)
-            await asyncio.sleep(SCROLL_STEP_S)
+            await asyncio.sleep(MOVE_SETTLE_S)
+            for _ in range(abs(steps)):
+                await client.pointer(x, y, mask)
+                await asyncio.sleep(SCROLL_STEP_S)
+                await client.pointer(x, y, 0)
+                await asyncio.sleep(SCROLL_STEP_S)
 
     def last_change_ts(self) -> float:
         return self._client.last_change if self._client is not None else 0.0

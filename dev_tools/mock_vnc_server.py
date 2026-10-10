@@ -98,6 +98,8 @@ class MockVncServer:
         self._repaint_delay = repaint_delay
         self._security_types = security_types
         self.events: list[Event] = []
+        self.subprotocols: list[str | None] = []  # negotiated per connection
+        self.frame_sizes: list[int] = []  # size of every websocket frame sent
         self.framebuffer = np.zeros((height, width, 4), np.uint8)
         self.framebuffer[..., :3] = BACKGROUND_BGR
         self._server: Server | None = None
@@ -137,6 +139,11 @@ class MockVncServer:
     def key_events(self) -> list[KeyEvent]:
         return [e for e in self.events if isinstance(e, KeyEvent)]
 
+    async def disconnect_clients(self) -> None:
+        """Close every client connection from the server side (simulates a dropped desktop)."""
+        for session in list(self._sessions):
+            await session.ws.close()
+
     async def push_copyrect(self, sx: int, sy: int, dx: int, dy: int, w: int, h: int) -> None:
         """Copy a region inside the server framebuffer and tell every client via CopyRect."""
         self.framebuffer[dy:dy + h, dx:dx + w] = self.framebuffer[sy:sy + h, sx:sx + w].copy()
@@ -164,7 +171,9 @@ class MockVncServer:
         async with session.send_lock:
             step = self._chunk_size or len(data) or 1
             for i in range(0, len(data), step):
-                await session.ws.send(data[i:i + step])
+                frame = data[i:i + step]
+                self.frame_sizes.append(len(frame))
+                await session.ws.send(frame)
 
     async def _flush(self, session: _Session) -> None:
         if not session.wants_update or not session.dirty:
@@ -181,6 +190,7 @@ class MockVncServer:
 
     async def _handle(self, ws: ServerConnection) -> None:
         session = _Session(ws)
+        self.subprotocols.append(ws.subprotocol)
         reader = _ClientReader(ws)
         try:
             if not await self._handshake(session, reader):

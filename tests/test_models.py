@@ -94,6 +94,15 @@ def test_screen_signature() -> None:
     assert sig.parameters["double"].default is False
     assert list(inspect.signature(Screen.scroll).parameters) == ["self", "x", "y", "steps"]
     assert list(inspect.signature(Screen.connect).parameters) == ["self", "url", "password"]
+    assert list(inspect.signature(Screen.screenshot).parameters) == ["self"]
+    assert list(inspect.signature(Screen.type_text).parameters) == ["self", "text"]
+    assert list(inspect.signature(Screen.key).parameters) == ["self", "combo"]
+    assert list(inspect.signature(Screen.last_change_ts).parameters) == ["self"]
+    assert list(inspect.signature(Screen.close).parameters) == ["self"]
+    methods = {n for n, v in vars(Screen).items() if inspect.isfunction(v) and not n.startswith("_")}
+    assert methods == {
+        "connect", "screenshot", "click", "type_text", "key", "scroll", "last_change_ts", "close",
+    }
 
 
 class FakeScreen:
@@ -138,4 +147,4 @@ async def test_classifier_may_return_none() -> None:
 )
 def test_port_members(proto: type, members: set[str]) -> None:
     public = {n for n in vars(proto) if not n.startswith("_")}
-    assert members <= public
+    assert members == public

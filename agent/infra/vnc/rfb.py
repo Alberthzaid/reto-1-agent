@@ -299,11 +299,16 @@ class RFBClient:
         await self._send(pack_key(keysym, down))
 
     async def close(self) -> None:
-        if self._task is not None:
-            self._task.cancel()
-            try:
-                await self._task
-            except (asyncio.CancelledError, RFBError):
-                pass
-        if self._ws is not None:
-            await self._ws.close()
+        """Cancel the reader and close the socket; idempotent, never raises the reader's error."""
+        try:
+            if self._task is not None:
+                self._task.cancel()
+                try:
+                    await self._task
+                except asyncio.CancelledError:
+                    pass
+                except Exception as exc:  # the reader may have died with any error
+                    log.debug("lector RFB terminó con %s", type(exc).__name__)
+        finally:
+            if self._ws is not None:
+                await self._ws.close()

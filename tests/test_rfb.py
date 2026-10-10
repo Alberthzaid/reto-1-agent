@@ -398,3 +398,138 @@ async def test_server_records_pointer_and_key_events() -> None:
             assert [(e.keysym, e.down) for e in server.key_events()] == [(0x61, True)]
         finally:
             await client.close()
+
+
+# ---------- remediation: close, subprotocol, auth-failure cleanup, bounds, key draw, chunking ----------
+
+from websockets.protocol import State  # noqa: E402
+
+
+@pytest.mark.asyncio
+async def test_close_cancels_reader_task_and_closes_socket() -> None:
+    async with MockVncServer(PASSWORD) as server:
+        client = RFBClient(server.url, PASSWORD)
+        await client.connect()
+        await first_frame(client)
+        task, ws = client._task, client._ws
+        assert task is not None and not task.done()
+        assert ws is not None and ws.state is State.OPEN
+        await client.close()
+        assert task.cancelled()
+        assert ws.state is State.CLOSED
+
+
+@pytest.mark.asyncio
+async def test_close_closes_socket_even_if_reader_died_with_any_exception() -> None:
+    async with MockVncServer(PASSWORD) as server:
+        client = RFBClient(server.url, PASSWORD)
+        await client.connect()
+        await first_frame(client)
+        ws = client._ws
+        assert client._task is not None and ws is not None
+        client._task.cancel()
+        await asyncio.gather(client._task, return_exceptions=True)
+
+        async def boom() -> None:
+            raise ValueError("bad rect")
+
+        client._task = asyncio.ensure_future(boom())
+        await asyncio.gather(client._task, return_exceptions=True)
+        await client.close()  # must not re-raise the reader's ValueError
+        assert ws.state is State.CLOSED
+
+
+@pytest.mark.asyncio
+async def test_close_is_idempotent_and_safe_before_connect() -> None:
+    await RFBClient("ws://127.0.0.1:1/x", "secret").close()
+    async with MockVncServer(PASSWORD) as server:
+        client = RFBClient(server.url, PASSWORD)
+        await client.connect()
+        await first_frame(client)
+        await client.close()
+        await client.close()
+
+
+@pytest.mark.asyncio
+async def test_subprotocol_binary_is_negotiated() -> None:
+    async with MockVncServer(PASSWORD) as server:
+        client = RFBClient(server.url, PASSWORD)
+        await client.connect()
+        try:
+            await wait_until(lambda: len(server.subprotocols) == 1)
+            assert server.subprotocols == ["binary"]
+            assert client._ws is not None and client._ws.subprotocol == "binary"
+        finally:
+            await client.close()
+
+
+@pytest.mark.asyncio
+async def test_socket_closed_after_failed_login(monkeypatch: pytest.MonkeyPatch) -> None:
+    import agent.infra.vnc.rfb as rfb_module
+
+    opened = []
+    real_connect = rfb_module.websockets.connect
+
+    async def spy(*args, **kwargs):  # type: ignore[no-untyped-def]
+        ws = await real_connect(*args, **kwargs)
+        opened.append(ws)
+        return ws
+
+    monkeypatch.setattr(rfb_module.websockets, "connect", spy)
+    async with MockVncServer(PASSWORD) as server:
+        client = RFBClient(server.url, "wrong-password")
+        with pytest.raises(RFBAuthError):
+            await client.connect()
+    assert len(opened) == 1
+    assert opened[0].state is State.CLOSED
+    assert client._ws is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("x,y", [(-1, 0), (0, -1), (64, 0), (0, 32), (999, 999)])
+async def test_client_pointer_out_of_bounds_raises_value_error(x: int, y: int) -> None:
+    async with MockVncServer(PASSWORD, width=64, height=32) as server:
+        client = RFBClient(server.url, PASSWORD)
+        await client.connect()
+        try:
+            await first_frame(client)
+            with pytest.raises(ValueError):
+                await client.pointer(x, y, 1)
+            await client.pointer(63, 31, 0)  # last valid pixel is accepted
+            await wait_until(lambda: len(server.events) == 1)
+            assert [(e.x, e.y) for e in server.pointer_events()] == [(63, 31)]
+        finally:
+            await client.close()
+
+
+@pytest.mark.asyncio
+async def test_key_event_makes_mock_draw() -> None:
+    async with MockVncServer(PASSWORD, width=64, height=32) as server:
+        client = RFBClient(server.url, PASSWORD)
+        await client.connect()
+        try:
+            await first_frame(client)
+            before = await client.snapshot()
+            updates = client.updates
+            await client.key(0x61, True)
+            await wait_until(lambda: client.updates > updates)
+            after = await client.snapshot()
+            assert after.tobytes() != before.tobytes()
+            assert after[10, 10, :3].tolist() == [0, 0, 255]  # key mark, BGR red
+            assert before[10, 10, :3].tolist() == [200, 100, 50]
+        finally:
+            await client.close()
+
+
+@pytest.mark.asyncio
+async def test_mock_frames_never_exceed_chunk_size() -> None:
+    async with MockVncServer(PASSWORD, width=16, height=8, chunk_size=64) as server:
+        client = RFBClient(server.url, PASSWORD)
+        await client.connect()
+        try:
+            await first_frame(client)
+            assert len(server.frame_sizes) > 8  # the 512-byte frame alone needs 8 chunks
+            assert max(server.frame_sizes) <= 64
+            assert 64 in server.frame_sizes  # chunks are actually full-sized, not 1-byte frames
+        finally:
+            await client.close()
