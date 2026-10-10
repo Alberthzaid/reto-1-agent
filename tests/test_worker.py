@@ -40,7 +40,8 @@ def _clear_registry() -> Iterator[None]:
 def build(fast: list[Any], strong: list[Any], screen: FakeScreen | None = None,
           trace: FakeTrace | None = None,
           reader: FakeReader | None = None, memory: Any = None,
-          fast_model: FakeModel | None = None) -> tuple[AgentWorker, FakeScreen, FakeModel, FakeModel]:
+          fast_model: FakeModel | None = None,
+          **extra: Any) -> tuple[AgentWorker, FakeScreen, FakeModel, FakeModel]:
     screen = screen or FakeScreen()
     clock = FakeClock()
     fast_model = fast_model or FakeModel(fast)
@@ -59,6 +60,7 @@ def build(fast: list[Any], strong: list[Any], screen: FakeScreen | None = None,
         settler_factory=lambda s: FakeSettler(s),  # type: ignore[arg-type]
         trace_factory=(lambda: trace) if trace is not None else None,
         memory=memory,
+        **extra,
     )
     return worker, screen, fast_model, strong_model
 
@@ -567,3 +569,25 @@ async def test_write_task_with_answer_is_still_verified() -> None:
     status, _ = await worker.run()
     assert status is TaskStatus.terminada
     assert len(strong.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_prompts_dir_is_used_by_policy_and_verifier(tmp_path: Path) -> None:
+    from agent.domain.policy import PROMPTS_DIR
+
+    for source in PROMPTS_DIR.glob("*.md"):
+        marked = source.read_text(encoding="utf-8") + "\nMARCA-" + source.stem
+        (tmp_path / source.name).write_text(marked, encoding="utf-8")
+    worker, _, fast, strong = build(HAPPY_FAST, [CONFIRM], prompts_dir=tmp_path)
+    status, _ = await worker.run()
+    assert status is TaskStatus.terminada
+    assert any("MARCA-system" in request["system"] for request in fast.requests)
+    assert any("MARCA-verify" in request["system"] for request in strong.requests)
+
+
+@pytest.mark.asyncio
+async def test_max_turns_limits_the_execution_loop() -> None:
+    worker, _, _, strong = build(HAPPY_FAST, [CONFIRM], max_turns=1)
+    status, _ = await worker.run()
+    assert status is TaskStatus.fallida
+    assert strong.requests == []

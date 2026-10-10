@@ -101,14 +101,19 @@ class SqliteMemory:
             ).fetchone()
         if row is None:
             return None
-        return Task(
-            id=row[0],
-            instruction=row[1],
-            desktop_url=row[2],
-            estado=TaskStatus(row[3]),
-            resumen=row[4],
-            created_at=datetime.fromisoformat(row[5]),
-        )
+        return _task_from_row(row)
+
+    async def list_tasks(self, limit: int = 50) -> list[Task]:
+        return await asyncio.to_thread(self._list_tasks, limit)
+
+    def _list_tasks(self, limit: int) -> list[Task]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT id, instruction, desktop_url, estado, resumen, created_at FROM tasks "
+                "ORDER BY created_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [_task_from_row(row) for row in rows]
 
     async def mark_stale_running_as_failed(self) -> int:
         return await asyncio.to_thread(self._mark_stale_running_as_failed)
@@ -189,6 +194,52 @@ class SqliteMemory:
                 "UPDATE procedures SET exitos = exitos - 1 WHERE app = ? AND intent = ? AND steps = ?",
                 [(app, intent, json.dumps(list(p.steps), ensure_ascii=False)) for p in procedures],
             )
+
+    # --- control panel (read-only listing and manual deletion) ------------------------------------
+
+    def has_procedures_table(self) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'procedures'"
+            ).fetchone()
+        return row is not None
+
+    async def list_procedures(self, limit: int = 200) -> list[Procedure]:
+        return await asyncio.to_thread(self._list_procedures, limit)
+
+    def _list_procedures(self, limit: int) -> list[Procedure]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT app, intent, steps, aprendizaje, exitos FROM procedures "
+                "ORDER BY exitos DESC, updated_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [
+            Procedure(app=row[0], intent=row[1], steps=tuple(json.loads(row[2])), aprendizaje=row[3], exitos=row[4])
+            for row in rows
+        ]
+
+    async def delete_procedure(self, app: str, intent: str, steps: Sequence[str]) -> bool:
+        return await asyncio.to_thread(self._delete_procedure, app, intent, steps)
+
+    def _delete_procedure(self, app: str, intent: str, steps: Sequence[str]) -> bool:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "DELETE FROM procedures WHERE app = ? AND intent = ? AND steps = ?",
+                (app, intent, json.dumps(list(steps), ensure_ascii=False)),
+            )
+            return cursor.rowcount > 0
+
+
+def _task_from_row(row: Sequence[str]) -> Task:
+    return Task(
+        id=row[0],
+        instruction=row[1],
+        desktop_url=row[2],
+        estado=TaskStatus(row[3]),
+        resumen=row[4],
+        created_at=datetime.fromisoformat(row[5]),
+    )
 
 
 def _now() -> str:

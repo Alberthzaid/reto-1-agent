@@ -192,7 +192,7 @@ async def test_classifier_may_return_none() -> None:
         (Reader, {"read"}),
         (Model, {"decide"}),
         (Memory, {"fingerprint", "procedures", "save_procedure", "penalize", "save_task", "load_task",
-                  "mark_stale_running_as_failed"}),
+                  "list_tasks", "mark_stale_running_as_failed"}),
         (Classifier, {"classify"}),
         (Screen, {"connect", "screenshot", "click", "type_text", "key", "scroll", "last_change_ts", "close"}),
     ],

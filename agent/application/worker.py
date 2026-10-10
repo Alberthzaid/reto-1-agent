@@ -5,6 +5,7 @@ import logging
 import time
 from collections.abc import Awaitable, Callable, Iterable, Sequence
 from dataclasses import replace
+from pathlib import Path
 from typing import Protocol, runtime_checkable
 from urllib.parse import urlparse
 
@@ -13,7 +14,7 @@ from agent.domain.app_profile import select_current
 from agent.domain.budget import task_deadline
 from agent.domain.guard import Guard
 from agent.domain.models import Plan, Procedure, TaskResult, TaskStatus, TextBox
-from agent.domain.policy import Policy
+from agent.domain.policy import DEFAULT_MAX_TURNS, PROMPTS_DIR, Policy
 from agent.domain.procedures import intent_key, sanitize_steps, sanitize_text
 from agent.domain.reporter import build_summary
 from agent.domain.settler import Settler
@@ -68,6 +69,8 @@ class AgentWorker:
         first_frame_timeout: float = FIRST_FRAME_TIMEOUT_S,
         classifier: Classifier | None = None,
         memory: Memory | None = None,
+        max_turns: int = DEFAULT_MAX_TURNS,
+        prompts_dir: Path = PROMPTS_DIR,
     ) -> None:
         self._instruction = instruction
         self._url = url
@@ -84,6 +87,8 @@ class AgentWorker:
         self._first_frame_timeout = first_frame_timeout
         self._classifier = classifier
         self._memory = memory
+        self._max_turns = max_turns
+        self._prompts_dir = prompts_dir
         self._guard = Guard(blocked_combos, planned_commits=0)
         self._screen: Screen | None = None
         self._closed = False
@@ -147,6 +152,8 @@ class AgentWorker:
             self._guard,
             self._clock,
             exec_deadline,
+            prompts_dir=self._prompts_dir,
+            max_turns=self._max_turns,
             classification=classification,
         )
         app = self._fingerprint(boxes)
@@ -176,7 +183,7 @@ class AgentWorker:
         final_image, final_boxes = await toolbox.observe()
         claim = "; ".join(filter(None, [result.resumen, "respuesta: " + "; ".join(result.respuesta)
                                         if result.respuesta else ""]))
-        confirmed, evidence = await Verifier(self._model_strong).confirm(
+        confirmed, evidence = await Verifier(self._model_strong, self._prompts_dir).confirm(
             plan, self._instruction, final_image, final_boxes, claim=claim,
             evidence=toolbox.commit_evidence,
         )

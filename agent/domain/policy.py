@@ -22,6 +22,7 @@ from agent.ports.interfaces import Model
 log = logging.getLogger(__name__)
 
 PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
+DEFAULT_MAX_TURNS = 40
 APP_DATE_FORMAT = "%d/%m/%Y"
 MAX_PLANNED_COMMITS = 3
 MIN_TURN_S = 3.0
@@ -142,7 +143,7 @@ class Policy:
         clock: Callable[[], float],
         deadline: float,
         prompts_dir: Path = PROMPTS_DIR,
-        max_turns: int = 40,
+        max_turns: int = DEFAULT_MAX_TURNS,
         finish_margin: float = 40.0,
         classification: Classification | None = None,
     ) -> None:

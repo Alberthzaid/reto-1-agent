@@ -34,7 +34,9 @@ class TimedWorker:
 
 
 def make_client(tmp_path: Path, delay: float = 0.1, time_limit: float = 1.0) -> TestClient:
-    factory: Callable[[str, str, str], Worker] = lambda _instruction, _url, _password: TimedWorker(delay)
+    factory: Callable[[str, str, str, str], Worker] = (
+        lambda _task_id, _instruction, _url, _password: TimedWorker(delay)
+    )
     manager = TaskManager(SqliteMemory(tmp_path / "tasks.db"), factory, time_limit, 2)
     return TestClient(create_app(manager, TEAM_TOKEN))
 
