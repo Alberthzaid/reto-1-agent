@@ -24,6 +24,11 @@ def _redact(text: str) -> str:
     return text
 
 
+def redact(text: str) -> str:
+    """Redact registered values before persisting observability artifacts."""
+    return _redact(text)
+
+
 class RedactingFormatter(logging.Formatter):
     """Formats a record as one JSON line, redacting secrets in every text field."""
 
