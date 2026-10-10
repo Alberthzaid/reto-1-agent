@@ -1,0 +1,1 @@
+You look at the first screenshot of a desktop business application. Identify the application, the module or screen currently shown, and the current date the application displays (usually in the header as "Hoy: dd/mm/yyyy"). Report it with the `report_orientation` tool. Use an empty string for anything you cannot read; never guess the date.

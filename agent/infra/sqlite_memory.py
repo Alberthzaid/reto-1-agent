@@ -1,15 +1,36 @@
-"""SQLite persistence for task state. Credentials are intentionally never stored."""
+"""SQLite persistence for task state and learned procedures. Credentials are intentionally never stored."""
 
 import asyncio
+import hashlib
+import json
+import logging
+import re
 import sqlite3
-from datetime import datetime
+import unicodedata
+from collections.abc import Sequence
+from datetime import datetime, timezone
 from pathlib import Path
 
-from agent.domain.models import Task, TaskStatus
+from agent.domain.models import Procedure, Task, TaskStatus, TextBox
+
+log = logging.getLogger(__name__)
+
+FINGERPRINT_BAND_Y = 90  # header band
+FINGERPRINT_BAND_X = 200  # left menu
+MIN_WORD_CHARS = 3
+TOP_PROCEDURES = 3
+# Defense in depth: learned text must never carry identifiers (NIT, phones, amounts) or emails.
+_DATA_RE = re.compile(r"\d{3,}|[\w.+-]+@[\w-]+(?:\.[\w-]+)+")
+
+
+def _plain_words(text: str) -> list[str]:
+    decomposed = unicodedata.normalize("NFKD", text)
+    plain = "".join(ch for ch in decomposed if not unicodedata.combining(ch)).lower()
+    return [word for word in re.findall(r"[a-z]+", plain) if len(word) >= MIN_WORD_CHARS]
 
 
 class SqliteMemory:
-    """Stores the task projection used by the HTTP API."""
+    """Stores the task projection used by the HTTP API and the navigation procedures that worked."""
 
     def __init__(self, path: Path) -> None:
         self._path = path
@@ -27,6 +48,23 @@ class SqliteMemory:
                 )
                 """
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS procedures (
+                    app TEXT NOT NULL,
+                    intent TEXT NOT NULL,
+                    steps TEXT NOT NULL,
+                    aprendizaje TEXT NOT NULL,
+                    exitos INTEGER NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY (app, intent, steps)
+                )
+                """
+            )
+            columns = {row[1] for row in connection.execute("PRAGMA table_info(procedures)")}
+            if "app_version" not in columns:
+                # Older databases: add the column in place; existing rows keep NULL (version unknown).
+                connection.execute("ALTER TABLE procedures ADD COLUMN app_version TEXT")
 
     def _connect(self) -> sqlite3.Connection:
         return sqlite3.connect(self._path)
@@ -82,3 +120,76 @@ class SqliteMemory:
                 (TaskStatus.fallida.value, "interrumpida al reiniciar", TaskStatus.en_curso.value),
             )
             return cursor.rowcount
+
+    # --- procedures ------------------------------------------------------------------------------
+
+    def fingerprint(self, boxes: list[TextBox]) -> str:
+        """Hash of the header/menu words: stable across screens of one app, ignores body, dates and numbers."""
+        words = {
+            word
+            for box in boxes
+            if box.y < FINGERPRINT_BAND_Y or box.x < FINGERPRINT_BAND_X
+            for word in _plain_words(box.text)
+        }
+        if not words:
+            return ""
+        return hashlib.sha1(" ".join(sorted(words)).encode("utf-8")).hexdigest()[:16]
+
+    async def procedures(self, app: str, intent: str) -> list[Procedure]:
+        return await asyncio.to_thread(self._procedures, app, intent)
+
+    def _procedures(self, app: str, intent: str) -> list[Procedure]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT app, intent, steps, aprendizaje, exitos, app_version FROM procedures
+                WHERE app = ? AND intent = ? AND exitos > 0
+                ORDER BY exitos DESC, updated_at DESC
+                LIMIT ?
+                """,
+                (app, intent, TOP_PROCEDURES),
+            ).fetchall()
+        return [
+            Procedure(
+                app=row[0], intent=row[1], steps=tuple(json.loads(row[2])), aprendizaje=row[3], exitos=row[4],
+                app_version=row[5],
+            )
+            for row in rows
+        ]
+
+    async def save_procedure(self, app: str, procedure: Procedure) -> None:
+        await asyncio.to_thread(self._save_procedure, app, procedure)
+
+    def _save_procedure(self, app: str, procedure: Procedure) -> None:
+        if any(_DATA_RE.search(text) for text in (*procedure.steps, procedure.aprendizaje)):
+            log.warning("procedimiento descartado: contiene datos que no deben guardarse")
+            return
+        steps = json.dumps(list(procedure.steps), ensure_ascii=False)
+        with self._connect() as connection:
+            connection.execute(
+                """
+                INSERT INTO procedures (app, intent, steps, aprendizaje, exitos, updated_at, app_version)
+                VALUES (?, ?, ?, ?, 1, ?, ?)
+                ON CONFLICT(app, intent, steps) DO UPDATE SET
+                    exitos = CASE WHEN procedures.app_version IS excluded.app_version
+                        THEN MAX(procedures.exitos, 0) + 1 ELSE 1 END,
+                    aprendizaje = excluded.aprendizaje,
+                    updated_at = excluded.updated_at,
+                    app_version = excluded.app_version
+                """,
+                (app, procedure.intent, steps, procedure.aprendizaje, _now(), procedure.app_version),
+            )
+
+    async def penalize(self, app: str, intent: str, procedures: Sequence[Procedure]) -> None:
+        await asyncio.to_thread(self._penalize, app, intent, procedures)
+
+    def _penalize(self, app: str, intent: str, procedures: Sequence[Procedure]) -> None:
+        with self._connect() as connection:
+            connection.executemany(
+                "UPDATE procedures SET exitos = exitos - 1 WHERE app = ? AND intent = ? AND steps = ?",
+                [(app, intent, json.dumps(list(p.steps), ensure_ascii=False)) for p in procedures],
+            )
+
+
+def _now() -> str:
+    return datetime.now(timezone.utc).isoformat()

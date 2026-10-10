@@ -18,7 +18,7 @@ Typed, immutable, env-driven settings that never expose secrets.
 | DATA_DIR | "data" |
 | TESSERACT_CMD | optional (None) |
 | FALCO_ENABLED | false |
-| FALCO_MODEL_DIR | "model_s1" |
+| FALCO_BASE_URL | "http://127.0.0.1:8000" |
 | MAX_CONCURRENT_TASKS | 8 |
 | DESKTOP_URL | optional (None) |
 | DESKTOP_PASSWORD | optional (None, secret) |
