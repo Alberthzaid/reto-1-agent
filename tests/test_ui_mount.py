@@ -81,7 +81,7 @@ def test_ui_login_uses_its_own_password_and_api_keeps_team_token(tmp_path: Path)
         assert client.post("/ui/login", data={"username": LOGIN_USER, "password": "admin"}).status_code == 200
         assert client.get("/ui/config").status_code == 200
         # The easy panel password never opens the API.
-        assert client.get("/health", headers={"Authorization": "Bearer admin"}).status_code == 401
+        assert client.get("/tasks/any-id", headers={"Authorization": "Bearer admin"}).status_code == 401
         assert client.get("/health", headers={"Authorization": f"Bearer {TEAM_TOKEN}"}).status_code == 200
 
 

@@ -53,8 +53,16 @@ def wait_for_status(client: TestClient, task_id: str, expected: str) -> dict[str
 
 def test_auth_is_required(tmp_path: Path) -> None:
     with make_client(tmp_path) as client:
-        assert client.get("/health").status_code == 401
         assert client.post("/tasks", json={"tarea": "x", "escritorio": DESKTOP}).status_code == 401
+        assert client.get("/tasks/any-id").status_code == 401
+
+
+def test_health_is_public_liveness(tmp_path: Path) -> None:
+    # The delivery validator probes GET /health without credentials and expects 200.
+    with make_client(tmp_path) as client:
+        response = client.get("/health")
+        assert response.status_code == 200
+        assert response.json() == {"status": "ok"}
 
 
 def test_post_returns_immediately_and_task_finishes(tmp_path: Path) -> None:

@@ -36,7 +36,7 @@ def create_app(
     auth = team_auth(team_token)
     app = FastAPI(title="Agent-QA", lifespan=lifespan)
 
-    @app.get("/health", dependencies=[Depends(auth)])
+    @app.get("/health")  # public liveness probe for the delivery validator
     async def health() -> dict[str, str]:
         if not manager.ready:
             raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail="No listo")
