@@ -9,15 +9,14 @@ from agent.ui.views import PanelContext
 log = logging.getLogger(__name__)
 
 UI_PATH = "/ui"
-UI_USER = "admin"
 
 
-def mount_ui(app: FastAPI, context: PanelContext, *, enabled: bool, password: str | None) -> bool:
-    """Mount the panel at /ui behind a login (user `admin`, `password`). True when mounted."""
+def mount_ui(app: FastAPI, context: PanelContext, *, enabled: bool) -> bool:
+    """Mount the panel at /ui without a login (open access for the jury). True when mounted.
+
+    The task API keeps requiring TEAM_TOKEN; turn the panel off with UI_ENABLED=false.
+    """
     if not enabled:
-        return False
-    if not password:
-        log.warning("UI_ENABLED está activo pero faltan UI_PASSWORD y TEAM_TOKEN: el panel no se monta")
         return False
     import gradio as gr
 
@@ -32,8 +31,6 @@ def mount_ui(app: FastAPI, context: PanelContext, *, enabled: bool, password: st
         path=UI_PATH,
         # Behind a proxy (X-Forwarded-Host) Gradio builds event file URLs from root_path alone.
         root_path=UI_PATH,
-        auth=[(UI_USER, password)],
-        auth_message="Inicie sesión con el usuario admin.",
         allowed_paths=[str(traces_dir)],
         show_error=False,
         ssr_mode=False,

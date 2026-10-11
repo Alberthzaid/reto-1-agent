@@ -52,5 +52,4 @@ mount_ui(
         procedures=memory,
     ),
     enabled=settings.ui_enabled,
-    password=settings.panel_password,
 )
